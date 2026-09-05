@@ -57,26 +57,17 @@ moving parts than editing a Sheet.
 Simplest combination: **Google Sheets for the two lists** (you edit them from anywhere) and
 **GitHub Pages for the `.crx` + `update.xml`** (upload once, rarely touched).
 
-## Deploy
+## Deploy (current setup)
 
-1. Decide where the `.crx` + `update.xml` live (GitHub Pages, S3, your server). Note the base URL.
-2. Put the two list URLs into `extension/config.js` (`sitesUrl`, `channelsUrl`): published-Sheet CSV
-   links, Gist raw links, or files next to the crx. Lists may be plain text or CSV (first column).
-3. Build:
-   ```
-   npm install
-   node build.js https://my-bucket.s3.ap-southeast-1.amazonaws.com/allowlist
-   ```
-4. Upload to that folder:
-   - `allowlist.txt`, `channels.txt` (Content-Type `text/plain`)
-   - `dist/update.xml` (Content-Type `text/xml`)
-   - `dist/allowlist-1.0.0.crx` (Content-Type `application/x-chrome-extension`)
-   Do not put the two `.txt` files behind a long-TTL CDN cache, or edits take hours to reach the PC.
-5. On each Windows PC, as administrator: double-click `dist/lockdown.reg`, then restart Edge.
-   `edge://policy` should list `ExtensionInstallForcelist` and the extension appears in the toolbar
-   as "installed by your organization".
+- Lists: Google Sheet `1VtlZ1FJlUmRQ3VDx7Gzlve7LZ-oHo79P9iFbNj-9VCs`, tabs `websites` and `youtube`,
+  read through the CSV export links already set in `extension/config.js`.
+- Package: `docs/` is served by GitHub Pages at `https://maoduy.github.io/edge-allowlist/`
+  (`update.xml` + `allowlist-<version>.crx`).
+- Registry: `dist/lockdown.reg` (built by `node build.js https://maoduy.github.io/edge-allowlist`).
 
-Users on the PC must be standard users (not administrators), otherwise they can delete the registry keys.
+On each Windows PC, as administrator: merge `lockdown.reg`, close and reopen Edge. `edge://policy`
+lists `ExtensionInstallForcelist`; the extension appears as "installed by your organization".
+Users on the PC must be standard users (not administrators), otherwise they can delete the keys.
 
 ## Update lists
 
@@ -84,8 +75,9 @@ Edit the two `.txt` files on S3. Every PC picks them up within 15 minutes (or on
 
 ## Update the extension code
 
-Bump `version` in `extension/manifest.json`, run `node build.js <base-url>` again, upload the new
-`.crx` and `update.xml`. Edge checks the update URL every few hours and updates silently.
+Bump `version` in `extension/manifest.json`, run `node build.js https://maoduy.github.io/edge-allowlist`,
+copy `dist/update.xml` and the new `dist/allowlist-<version>.crx` into `docs/`, commit and push.
+Edge checks the update URL every few hours and updates silently.
 
 ## Behaviour details
 
