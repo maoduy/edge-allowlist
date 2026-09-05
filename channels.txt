@@ -1,0 +1,4 @@
+# YouTube channels allowed to play. Handle (@name) or channel ID (UC...).
+@khanacademy
+@TED
+UCX6OQ3DkcsbYNE6H8uQQuVA

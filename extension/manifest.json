@@ -1,0 +1,23 @@
+{
+  "manifest_version": 3,
+  "name": "Site & YouTube Channel Allowlist",
+  "version": "1.0.0",
+  "description": "Allows only listed websites and only listed YouTube channels. Lists are pulled from remote text files every 15 minutes.",
+  "minimum_chrome_version": "121",
+  "permissions": ["declarativeNetRequest", "storage", "alarms"],
+  "host_permissions": ["<all_urls>"],
+  "background": { "service_worker": "background.js" },
+  "content_scripts": [
+    {
+      "matches": ["*://www.youtube.com/*", "*://m.youtube.com/*", "*://youtube.com/*"],
+      "js": ["config.js", "youtube.js"],
+      "css": ["youtube.css"],
+      "run_at": "document_start",
+      "all_frames": false
+    }
+  ],
+  "web_accessible_resources": [
+    { "resources": ["blocked.html"], "matches": ["<all_urls>"] }
+  ],
+  "icons": { "128": "icon128.png" }
+}

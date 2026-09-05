@@ -1,0 +1,20 @@
+#yt-allowlist-overlay {
+  position: fixed; inset: 0; z-index: 2147483647;
+  background: rgba(15, 15, 15, .96); color: #fff;
+  display: flex; align-items: center; justify-content: center;
+  font-family: system-ui, "Segoe UI", Roboto, sans-serif;
+}
+#yt-allowlist-overlay .box { text-align: center; max-width: 520px; padding: 24px; }
+#yt-allowlist-overlay .t { font-size: 24px; font-weight: 600; }
+#yt-allowlist-overlay .s { margin-top: 10px; font-size: 15px; color: #bbb; }
+#yt-allowlist-overlay:not(.block) { background: rgba(15,15,15,.7); }
+
+/* feed items whose channel is not on the list */
+[data-allowlist-hidden] { display: none !important; }
+
+/* shorts shelves, related sidebar, end-screen suggestions, comments */
+ytd-reel-shelf-renderer, ytd-rich-shelf-renderer[is-shorts],
+ytd-rich-section-renderer:has(ytd-reel-shelf-renderer),
+ytd-mini-guide-entry-renderer[aria-label="Shorts"], ytd-guide-entry-renderer:has(a[title="Shorts"]),
+.ytp-ce-element, .ytp-endscreen-content, .ytp-suggestion-set, .ytp-autonav-endscreen-countdown-overlay,
+ytd-comments { display: none !important; }

@@ -1,0 +1,6 @@
+# One entry per line. A bare domain covers all its subdomains.
+# domain/path allows only that path prefix.
+youtube.com
+google.com
+wikipedia.org
+khanacademy.org
