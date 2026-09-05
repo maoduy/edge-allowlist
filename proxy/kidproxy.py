@@ -92,6 +92,34 @@ def _norm_channel(s):
     if re.match(r"^UC[\w-]{20,}$", s): return ("id", s)
     return ("handle", s.lstrip("@").lower())
 
+_ID_CACHE_FILE = os.path.join(HERE, "channel-ids.json")
+_id_cache = {}
+try:
+    with open(_ID_CACHE_FILE, encoding="utf-8") as f: _id_cache = json.load(f)
+except Exception:
+    pass
+
+def resolve_handle(handle):
+    """@handle -> UC... channel id via YouTube's own URL resolver (cached on disk)."""
+    h = handle.lower()
+    if h in _id_cache: return _id_cache[h]
+    try:
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        body = json.dumps({"context": {"client": {"clientName": "WEB", "clientVersion": "2.20240101.00.00"}},
+                           "url": f"https://www.youtube.com/@{handle}"}).encode()
+        req = urllib.request.Request("https://www.youtube.com/youtubei/v1/navigation/resolve_url?prettyPrint=false",
+                                     data=body, headers={"Content-Type": "application/json", "User-Agent": "Mozilla/5.0"})
+        with opener.open(req, timeout=20) as r:
+            cid = (json.load(r).get("endpoint") or {}).get("browseEndpoint", {}).get("browseId")
+        if cid and cid.startswith("UC"):
+            _id_cache[h] = cid
+            with open(_ID_CACHE_FILE, "w", encoding="utf-8") as f: json.dump(_id_cache, f)
+            return cid
+        log(f"resolve @{handle}: no channel id in response")
+    except Exception as e:
+        log(f"resolve @{handle} failed: {e}")
+    return None
+
 def refresh():
     try:
         sites = _first_col(_fetch(CFG["sitesUrl"]))
@@ -107,6 +135,9 @@ def refresh():
     for c in chans:
         k, v = _norm_channel(c)
         (i.add(v) if k == "id" else h.add(v))
+    for hd in sorted(h):
+        cid = resolve_handle(hd)
+        if cid: i.add(cid)
     # hosts needed to keep the sheet itself and the YouTube player working
     for extra in ("docs.google.com", "googleusercontent.com", "googlevideo.com", "ytimg.com", "ggpht.com", "gstatic.com", "googleapis.com"):
         d.add(extra)
@@ -271,30 +302,29 @@ RENDERERS = ("videoRenderer", "compactVideoRenderer", "gridVideoRenderer", "rich
              "reelItemRenderer", "playlistVideoRenderer", "lockupViewModel", "videoWithContextRenderer")
 DROP_ALWAYS = ("reelShelfRenderer", "shortsLockupViewModel", "richShelfRenderer")
 
-def _find_channel(obj, depth=0):
-    """First (handle, channelId) found in a renderer's browse endpoints."""
-    if depth > 12: return (None, None)
+def _find_channels(obj, out, depth=0):
+    """Collect (handle, channelId) pairs from every browse endpoint inside a renderer."""
+    if depth > 14: return
     if isinstance(obj, dict):
+        if "reelWatchEndpoint" in obj: out.append(("__shorts__", None))
         be = obj.get("browseEndpoint")
         if isinstance(be, dict):
             base = be.get("canonicalBaseUrl") or ""
             bid = be.get("browseId") or ""
             m = re.match(r"^/@([^/?#]+)", base)
             if m or bid.startswith("UC"):
-                return (m.group(1) if m else None, bid if bid.startswith("UC") else None)
-        for v in obj.values():
-            r = _find_channel(v, depth + 1)
-            if r != (None, None): return r
+                out.append((m.group(1) if m else None, bid if bid.startswith("UC") else None))
+        for v in obj.values(): _find_channels(v, out, depth + 1)
     elif isinstance(obj, list):
-        for v in obj:
-            r = _find_channel(v, depth + 1)
-            if r != (None, None): return r
-    return (None, None)
+        for v in obj: _find_channels(v, out, depth + 1)
 
 def _item_allowed(item):
-    h, cid = _find_channel(item)
-    if h is None and cid is None: return False
-    return channel_allowed(h, cid)
+    found = []
+    _find_channels(item, found)
+    if any(h == "__shorts__" for h, _ in found) and CFG["blockShorts"]: return False
+    found = [(h, c) for h, c in found if h != "__shorts__"]
+    if not found: return False
+    return any(channel_allowed(h, c) for h, c in found)
 
 def filter_json(obj, stats, depth=0):
     if depth > 60: return obj
@@ -309,11 +339,35 @@ def filter_json(obj, stats, depth=0):
                     if _item_allowed(el): out.append(filter_json(el, stats, depth + 1))
                     else: stats["dropped"] += 1
                     continue
+                if key == "guideEntryRenderer" and CFG["blockShorts"]:
+                    if json.dumps(el).find('"FEshorts"') >= 0 or '"reelWatchEndpoint"' in json.dumps(el):
+                        stats["dropped"] += 1; continue
             out.append(filter_json(el, stats, depth + 1))
         return out
     if isinstance(obj, dict):
         return {k: filter_json(v, stats, depth + 1) for k, v in obj.items()}
     return obj
+
+def scrub_player_responses(obj, stats, depth=0):
+    """Find every player response (any endpoint: player, get_watch, reel_item_watch, ...) and neuter it
+    when the channel is not allowed."""
+    if depth > 30: return
+    if isinstance(obj, dict):
+        if "playabilityStatus" in obj and ("videoDetails" in obj or "microformat" in obj):
+            h, cid = _player_channel(obj)
+            if not channel_allowed(h, cid):
+                obj["playabilityStatus"] = {"status": "UNPLAYABLE", "reason": "Kênh này chưa được duyệt",
+                    "errorScreen": {"playerErrorMessageRenderer": {
+                        "reason": {"simpleText": "Kênh này chưa được duyệt"},
+                        "subreason": {"simpleText": "Chỉ xem được video từ các kênh trong danh sách cho phép."}}}}
+                for k in ("streamingData", "captions", "storyboards", "playerConfig", "adPlacements", "adSlots", "playerAds"):
+                    obj.pop(k, None)
+                stats["blocked"] += 1
+                log(f"BLOCK video channel=@{h}/{cid}")
+            return
+        for v in obj.values(): scrub_player_responses(v, stats, depth + 1)
+    elif isinstance(obj, list):
+        for v in obj: scrub_player_responses(v, stats, depth + 1)
 
 def _player_channel(pr):
     vd = pr.get("videoDetails") or {}
@@ -365,8 +419,8 @@ class KidProxy:
             if not url_allowed(host, path):
                 flow.response = blocked_page("Trang này không nằm trong danh sách được phép", host)
             return
-        if CFG["blockShorts"] and path.startswith("/shorts"):
-            flow.response = blocked_page("YouTube Shorts đã bị tắt", "")
+        if CFG["blockShorts"] and (path.startswith("/shorts") or path.startswith("/youtubei/v1/reel/")):
+            flow.response = blocked_page("YouTube Shorts đã bị tắt", "") if path.startswith("/shorts") else http.Response.make(403, b"shorts blocked")
 
     def response(self, flow: http.HTTPFlow):
         host, path = flow.request.host.lower(), flow.request.path
@@ -374,14 +428,13 @@ class KidProxy:
         ct = flow.response.headers.get("content-type", "")
         p = path.split("?")[0]
         try:
-            if p.startswith("/youtubei/v1/player") and "json" in ct:
-                pr = json.loads(flow.response.get_text(strict=False) or "{}")
-                h, cid = _player_channel(pr)
-                if not channel_allowed(h, cid):
-                    pr["playabilityStatus"] = {"status": "UNPLAYABLE", "reason": "Kênh này chưa được duyệt"}
-                    pr.pop("streamingData", None)
-                    flow.response.set_text(json.dumps(pr))
-                    log(f"BLOCK video channel=@{h}/{cid}")
+            if "json" in ct and p.startswith("/youtubei/"):
+                data = json.loads(flow.response.get_text(strict=False) or "null")
+                st = {"dropped": 0, "blocked": 0}
+                scrub_player_responses(data, st)
+                if CFG["filterFeeds"]: data = filter_json(data, st)
+                if st["dropped"] or st["blocked"]:
+                    flow.response.set_text(json.dumps(data, separators=(",", ":")))
             elif p == "/watch" and "html" in ct:
                 body = flow.response.get_text(strict=False) or ""
                 h, cid = _html_channel(body)
@@ -389,15 +442,11 @@ class KidProxy:
                     flow.response = blocked_page("Kênh YouTube này chưa được duyệt", f"@{h}" if h else (cid or ""))
                     log(f"BLOCK watch channel=@{h}/{cid}")
                 elif CFG["filterFeeds"]:
-                    st = {"dropped": 0}
+                    st = {"dropped": 0, "blocked": 0}
                     flow.response.set_text(_rewrite_initial_data(body, st))
-            elif CFG["filterFeeds"] and "json" in ct and p.startswith(("/youtubei/v1/search", "/youtubei/v1/browse", "/youtubei/v1/next", "/youtubei/v1/guide")):
-                data = json.loads(flow.response.get_text(strict=False) or "{}")
-                st = {"dropped": 0}
-                flow.response.set_text(json.dumps(filter_json(data, st), separators=(",", ":")))
-            elif CFG["filterFeeds"] and "html" in ct and (p == "/" or p.startswith(("/results", "/feed", "/@", "/channel/", "/c/", "/user/"))):
+            elif CFG["filterFeeds"] and "html" in ct and (p == "/" or p.startswith(("/results", "/feed", "/@", "/channel/", "/c/", "/user/", "/playlist"))):
                 body = flow.response.get_text(strict=False) or ""
-                st = {"dropped": 0}
+                st = {"dropped": 0, "blocked": 0}
                 flow.response.set_text(_rewrite_initial_data(body, st))
         except Exception as e:
             log(f"filter error on {p}: {e}")

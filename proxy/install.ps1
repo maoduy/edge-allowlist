@@ -39,7 +39,10 @@ if (-not (Test-Path "$Dir\mitmdump.exe")) {
   Remove-Item $zip, $ex -Recurse -Force -ErrorAction SilentlyContinue
 }
 
-# 2. addon + config
+# 2. addon + config (stop a running instance first so the new code is picked up)
+Stop-ScheduledTask -TaskName "KidProxy" -ErrorAction SilentlyContinue
+Stop-Process -Name mitmdump -Force -ErrorAction SilentlyContinue
+Start-Sleep -Seconds 1
 Copy-Item (Join-Path $PSScriptRoot "kidproxy.py") $Dir -Force
 @{ exemptUsers = @($ExemptUsers); enforceUsers = @($EnforceUsers); logFile = "$Dir\kidproxy.log" } |
   ConvertTo-Json | Set-Content -Path "$Dir\kidproxy.json" -Encoding UTF8
