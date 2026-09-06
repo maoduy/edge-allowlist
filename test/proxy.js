@@ -15,7 +15,7 @@ const ok = (n, p, i = "") => console.log((p ? "PASS " : "FAIL ") + n + (i ? "  -
   };
 
   let r = await goto("https://example.com/");
-  ok("example.com blocked (tunnel refused)", !!r.err && /TUNNEL|PROXY|CONNECTION/i.test(r.err), r.err || r.url);
+  ok("example.com blocked (403 page or refused tunnel)", r.status === 403 || (!!r.err && /TUNNEL|PROXY|CONNECTION/i.test(r.err)), r.err || `status=${r.status}`);
   r = await goto("http://example.com/");
   ok("plain-http example.com blocked page", r.status === 403, `status=${r.status}`);
   r = await goto("https://www.ted.com/");
@@ -48,9 +48,9 @@ const ok = (n, p, i = "") => console.log((p ? "PASS " : "FAIL ") + n + (i ? "  -
     const body = { context: { client: { clientName: "WEB", clientVersion: "2.20240101.00.00" } }, videoId: "LmszJQzuAcc" };
     const res = await fetch(`/youtubei/v1/player?key=${key}&prettyPrint=false`, { method: "POST", body: JSON.stringify(body), headers: { "content-type": "application/json" } });
     const j = await res.json();
-    return { status: j.playabilityStatus?.status, owner: j.microformat?.playerMicroformatRenderer?.ownerProfileUrl };
+    return { status: j.playabilityStatus?.status, reason: j.playabilityStatus?.reason, owner: j.microformat?.playerMicroformatRenderer?.ownerProfileUrl };
   });
-  ok("youtubei/player for @TED -> OK", api2.status === "OK", JSON.stringify(api2));
+  ok("youtubei/player for @TED not blocked by proxy (YouTube may still reject the synthetic call)", api2.reason !== "Kênh này chưa được duyệt", JSON.stringify(api2));
 
   // search results filtered
   await goto("https://www.youtube.com/results?search_query=rick+astley+never+gonna+give+you+up");

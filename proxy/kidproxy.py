@@ -12,7 +12,7 @@ Run:  mitmdump -s kidproxy.py --listen-host 127.0.0.1 --listen-port 8080
 Config: kidproxy.json next to this file (optional), keys: sitesUrl, channelsUrl,
         refreshSeconds, exemptUsers (list), enforceUsers (list, overrides admin check).
 """
-import csv, io, json, os, re, sys, threading, time, urllib.request, subprocess, platform
+import csv, io, json, os, re, sys, threading, time, urllib.request, urllib.parse, subprocess, platform
 from mitmproxy import http, ctx
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -24,6 +24,10 @@ DEFAULTS = {
     "enforceUsers": [],      # if non-empty: ONLY these users are filtered
     "blockShorts": True,
     "filterFeeds": True,
+    # smart mode: only page navigations must be to a listed site; resources a listed page loads
+    # (scripts, images, video, embedded players) are allowed automatically via Referer/Origin.
+    "smartDependencies": True,
+    "dependencyTtlSeconds": 3600,
     "logFile": "",
 }
 CFG = dict(DEFAULTS)
@@ -36,7 +40,14 @@ except Exception as e:
     print("kidproxy: bad kidproxy.json:", e, file=sys.stderr)
 
 YT_HOSTS = {"youtube.com", "www.youtube.com", "m.youtube.com", "youtubei.googleapis.com"}
-HEADERS = {"site", "sites", "domain", "domains", "url", "urls", "channel", "channels", "kênh", "trang"}
+HEADERS = {"site", "sites", "website", "websites", "domain", "domains", "url", "urls", "channel", "channels", "kênh", "trang", "trang web"}
+# never allowed, even as a dependency of a listed page
+AD_HOSTS = ("doubleclick.net", "googlesyndication.com", "googleadservices.com", "adnxs.com", "adsrvr.org", "rubiconproject.com",
+            "pubmatic.com", "openx.net", "criteo.com", "criteo.net", "taboola.com", "outbrain.com", "amazon-adsystem.com",
+            "adsafeprotected.com", "moatads.com", "3lift.com", "casalemedia.com", "yieldmo.com", "sharethrough.com")
+def is_ad_host(host):
+    host = (host or "").lower()
+    return any(host == a or host.endswith("." + a) for a in AD_HOSTS)
 SYSTEM_USERS = {"system", "local service", "network service"}
 
 def log(msg):
@@ -138,8 +149,9 @@ def refresh():
     for hd in sorted(h):
         cid = resolve_handle(hd)
         if cid: i.add(cid)
-    # hosts needed to keep the sheet itself and the YouTube player working
-    for extra in ("docs.google.com", "googleusercontent.com", "googlevideo.com", "ytimg.com", "ggpht.com", "gstatic.com", "googleapis.com"):
+    # hosts needed to keep the sheet itself, the YouTube player and bot checks (which send no referer) working
+    for extra in ("docs.google.com", "googleusercontent.com", "googlevideo.com", "ytimg.com", "ggpht.com", "gstatic.com", "googleapis.com",
+                  "challenges.cloudflare.com", "recaptcha.net"):
         d.add(extra)
     if h or i:
         d.update({"youtube.com", "youtube-nocookie.com"})
@@ -173,6 +185,41 @@ def channel_allowed(handle=None, cid=None):
         if handle and handle.lstrip("@").lower() in L.handles: return True
         if cid and cid in L.ids: return True
     return False
+
+# hosts that were embedded (iframe) by a listed page; their own sub-resources are trusted for a while
+_dyn = {}
+def _dyn_allow(host):
+    _dyn[host.lower()] = time.time() + int(CFG["dependencyTtlSeconds"])
+def _dyn_ok(host):
+    exp = _dyn.get((host or "").lower())
+    return bool(exp and exp > time.time())
+
+def _hdr_host(value):
+    try:
+        return (urllib.parse.urlsplit(value).hostname or "").lower()
+    except Exception:
+        return ""
+
+NAV_DESTS = {"document"}
+FRAME_DESTS = {"iframe", "frame", "embed", "object", "fencedframe"}
+def smart_allowed(flow):
+    """Smart mode. Only listed sites may be opened as a page (checked by the caller).
+    - frames: allowed when embedded by a listed page (or by a frame that was itself allowed), and the
+      frame's host is then trusted for a while so its own sub-resources load;
+    - any other browser sub-resource (script, style, image, font, xhr, media, websocket...) is allowed,
+      because it can only originate from a page that was itself allowed;
+    - requests without Sec-Fetch-Dest (non-browser apps) and ad networks are never allowed this way."""
+    if not CFG["smartDependencies"] or is_ad_host(flow.request.host): return False
+    h = flow.request.headers
+    dest = h.get("sec-fetch-dest", "").lower()
+    if not dest or dest in NAV_DESTS: return False
+    if dest in FRAME_DESTS:
+        ref = _hdr_host(h.get("referer", "")) or _hdr_host(h.get("origin", ""))
+        if ref and (host_allowed(ref) or _dyn_ok(ref)):
+            _dyn_allow(flow.request.host)
+            return True
+        return False
+    return True
 
 # ---------------------------------------------------------------- who is connecting?
 _admins = {"__t": 0, "names": set()}
@@ -402,22 +449,31 @@ class KidProxy:
     def http_connect(self, flow: http.HTTPFlow):
         host = flow.request.host
         if not enforced(flow): return
+        if CFG["smartDependencies"]: return          # decided per request after TLS interception
         if not host_allowed(host):
             flow.response = http.Response.make(403, b"blocked by kidproxy: " + host.encode())
             log(f"BLOCK site {host} ({client_user(flow)})")
 
     def tls_clienthello(self, data):
         host = (data.context.server.address or ("",))[0].lower()
-        if host not in YT_HOSTS or not enforced(data.context):
-            data.ignore_connection = True   # pass through untouched
+        if not enforced(data.context):
+            data.ignore_connection = True   # admins: pass through untouched
+            return
+        if CFG["smartDependencies"]: return            # intercept everything for filtered users
+        if host not in YT_HOSTS:
+            data.ignore_connection = True
 
     def request(self, flow: http.HTTPFlow):
         if not enforced(flow): return
         host, path = flow.request.host.lower(), flow.request.path
         if host not in YT_HOSTS:
-            # plain-http request (no CONNECT)
-            if not url_allowed(host, path):
-                flow.response = blocked_page("Trang này không nằm trong danh sách được phép", host)
+            if not (url_allowed(host, path) or smart_allowed(flow)):
+                dest = flow.request.headers.get("sec-fetch-dest", "").lower()
+                if dest in NAV_DESTS or not dest:
+                    flow.response = blocked_page("Trang này không nằm trong danh sách được phép", host)
+                else:
+                    flow.response = http.Response.make(403, b"blocked by kidproxy")
+                log(f"BLOCK site {host} dest={dest or '-'} ref={_hdr_host(flow.request.headers.get('referer',''))} ({client_user(flow)})")
             return
         if CFG["blockShorts"] and (path.startswith("/shorts") or path.startswith("/youtubei/v1/reel/")):
             flow.response = blocked_page("YouTube Shorts đã bị tắt", "") if path.startswith("/shorts") else http.Response.make(403, b"shorts blocked")

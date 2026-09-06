@@ -2,9 +2,11 @@
 
 A mitmproxy addon that runs as a SYSTEM service on the kid's Windows PC.
 
-- Websites: only domains in the sheet's `websites` tab can be reached. Everything else is refused
-  at the proxy (browser shows a connection error). Unlike the extension, this applies to **every
-  request** of every app, so CDN/helper hosts must be in the list too (they are).
+- Websites: only domains in the sheet's `websites` tab can be **opened as a page**. Smart mode
+  (`smartDependencies`, on by default) then allows whatever a listed page loads: scripts, images,
+  video streams, embedded players (frames are allowed only when embedded by a listed page). Ad
+  networks are refused always. So the sheet holds only the ~25 core sites, no CDN/helper hosts.
+  Non-browser apps get the strict rule: host must be listed.
 - YouTube: youtube.com traffic is decrypted by the proxy. A video plays only if its channel is in the
   `youtube` tab; other videos get "Kênh này chưa được duyệt". Home, search, related lists and channel
   pages are filtered to listed channels. Shorts are blocked.
