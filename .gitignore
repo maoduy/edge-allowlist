@@ -1,3 +1,9 @@
 node_modules/
 dist/
 keys/
+proxy/kidproxy-sheets.json
+proxy/kidproxy.json
+proxy/urllog-state.json
+proxy/urls.jsonl
+proxy/__pycache__/
+proxy/channel-ids.json

@@ -9,7 +9,11 @@ What it does
   1. Installs mitmproxy (mitmdump.exe) + kidproxy.py into C:\Program Files\KidProxy (admin-only folder)
   2. Runs it as a SYSTEM scheduled task at boot (+ a 5-minute watchdog). Standard users cannot stop it.
   3. Trusts the proxy's certificate machine-wide (needed to inspect youtube.com for the channel filter)
-  4. Points Edge, Chrome and the Windows system proxy at 127.0.0.1:8080 by policy, locks the proxy UI,
+  4. Optionally logs every URL the filtered accounts visit into a Google Sheet:
+     one tab per month "MM-yyyy", row = URL, column = day, cell = number of hits
+     (blocked attempts land in "MM-yyyy chan").  Pass -LogSheetId <id>.
+  5. Forces Google as the default search provider and new tab page (Bing is not on the allowlist).
+  6. Points Edge, Chrome and the Windows system proxy at 127.0.0.1:8080 by policy, locks the proxy UI,
      blocks extensions / DevTools / InPrivate so the proxy cannot be bypassed from inside the browser.
 Members of the local Administrators group are never filtered; everyone else is.
 #>
@@ -17,6 +21,8 @@ param(
   [string[]]$ExemptUsers = @(),
   [string[]]$EnforceUsers = @(),
   [int]$Port = 8080,
+  [string]$LogSheetId = "",                      # Google Sheet id to log visited URLs into
+  [string]$LogCredentials = "",                  # its service-account json (default: .\kidproxy-sheets.json)
   [string]$MitmVersion = "12.2.3"
 )
 $ErrorActionPreference = "Stop"
@@ -44,8 +50,21 @@ Stop-ScheduledTask -TaskName "KidProxy" -ErrorAction SilentlyContinue
 Stop-Process -Name mitmdump -Force -ErrorAction SilentlyContinue
 Start-Sleep -Seconds 1
 Copy-Item (Join-Path $PSScriptRoot "kidproxy.py") $Dir -Force
-@{ exemptUsers = @($ExemptUsers); enforceUsers = @($EnforceUsers); logFile = "$Dir\kidproxy.log" } |
-  ConvertTo-Json | Set-Content -Path "$Dir\kidproxy.json" -Encoding UTF8
+Copy-Item (Join-Path $PSScriptRoot "sheetlog.py") $Dir -Force
+# "kidproxy update" from any terminal, for standard users too
+$cmd = Get-Content (Join-Path $PSScriptRoot "kidproxy.cmd") -Raw
+$cmd -replace 'set PORT=8080', "set PORT=$Port" |
+  Set-Content -Path "$env:SystemRoot\System32\kidproxy.cmd" -Encoding ASCII
+$cfg = @{ exemptUsers = @($ExemptUsers); enforceUsers = @($EnforceUsers); logFile = "$Dir\kidproxy.log" }
+if ($LogSheetId) {
+  if (-not $LogCredentials) { $LogCredentials = Join-Path $PSScriptRoot "kidproxy-sheets.json" }
+  if (-not (Test-Path $LogCredentials)) { throw "URL log needs a service-account key: $LogCredentials not found." }
+  Copy-Item $LogCredentials "$Dir\kidproxy-sheets.json" -Force
+  $cfg.urlLog = @{ enabled = $true; sheetId = $LogSheetId; credentials = "kidproxy-sheets.json";
+                   flushSeconds = 300; sheetAllRequests = $false; localFile = "$Dir\urls.jsonl" }
+  Write-Host "URL log -> sheet $LogSheetId"
+}
+$cfg | ConvertTo-Json -Depth 5 | Set-Content -Path "$Dir\kidproxy.json" -Encoding UTF8
 
 # 3. scheduled tasks (SYSTEM, at boot, no time limit, restart on failure) + watchdog
 $exe = "$Dir\mitmdump.exe"
@@ -74,6 +93,13 @@ foreach ($k in "HKLM:\SOFTWARE\Policies\Microsoft\Edge", "HKLM:\SOFTWARE\Policie
   Set-ItemProperty -Path $k -Name ProxyServer -Value $Proxy
   Set-ItemProperty -Path $k -Name DeveloperToolsAvailability -Value 2 -Type DWord
   Set-ItemProperty -Path $k -Name BrowserGuestModeEnabled -Value 0 -Type DWord
+  # Edge/Chrome default to Bing, which is not on the allowlist - an address-bar search would
+  # just hit a block page. Point search, suggestions and the new tab page at Google instead.
+  Set-ItemProperty -Path $k -Name DefaultSearchProviderEnabled -Value 1 -Type DWord
+  Set-ItemProperty -Path $k -Name DefaultSearchProviderName -Value "Google"
+  Set-ItemProperty -Path $k -Name DefaultSearchProviderSearchURL -Value "https://www.google.com/search?q={searchTerms}"
+  Set-ItemProperty -Path $k -Name DefaultSearchProviderSuggestURL -Value "https://www.google.com/complete/search?output=chrome&q={searchTerms}"
+  Set-ItemProperty -Path $k -Name NewTabPageLocation -Value "https://www.google.com/"
   New-Item -Path "$k\ExtensionInstallBlocklist" -Force | Out-Null
   Set-ItemProperty -Path "$k\ExtensionInstallBlocklist" -Name "1" -Value "*"
   Remove-Item -Path "$k\ExtensionInstallForcelist" -Recurse -Force -ErrorAction SilentlyContinue  # from the earlier attempt

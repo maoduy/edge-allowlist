@@ -49,3 +49,42 @@ python3 -m venv .venv-proxy && .venv-proxy/bin/pip install mitmproxy
 .venv-proxy/bin/mitmdump -s proxy/kidproxy.py --listen-port 8081 --set confdir=/tmp/ca   # with kidproxy.json enforceUsers=[you]
 node test/proxy.js
 ```
+
+## URL log to Google Sheets
+
+Every page the filtered accounts visit is written to a Google Sheet:
+one tab per month named `MM-yyyy`, **row = URL, column = day of month, cell = number of hits**.
+Blocked attempts go to a parallel tab `MM-yyyy chan`.
+
+Enable it at install time:
+
+```powershell
+.\install.ps1 -LogSheetId 1VtlZ1FJ...9VCs -LogCredentials .\kidproxy-sheets.json
+```
+
+`kidproxy.json` keys (under `urlLog`):
+
+| key | default | meaning |
+|---|---|---|
+| `enabled` | `false` | master switch |
+| `sheetId` | `""` | target spreadsheet |
+| `credentials` | `kidproxy-sheets.json` | service-account key, relative to the install dir |
+| `flushSeconds` | `300` | how often the buffer is pushed (1–3 API calls per push) |
+| `sheetAllRequests` | `false` | `false` = only page navigations reach the sheet |
+| `localFile` | `""` | path to a JSONL of **every** request, including sub-resources |
+
+Notes:
+
+* Counts are held locally in `urllog-state.json` and pushed as totals, so a failed push
+  or a reboot never loses or double-counts a hit.
+* The row key is `host + path` plus only the params that identify a page (`v`, `list`,
+  `q`, `search_query`), so `youtube.com/watch?v=...` stays distinguishable without the
+  URL cardinality exploding.
+* `http://kidproxy.local/update` pushes the log immediately as well as re-reading the lists.
+* Use a **dedicated** service account. The key sits on the kid's PC; anything else that
+  account can reach is reachable from there too.
+* Sheets allows 10M cells per workbook. At ~2k URLs/month that is years of headroom,
+  but archive to a new workbook yearly if the kid is a heavy browser.
+* Google's JWT signing uses `cryptography`, which ships inside `mitmdump.exe`.
+  `google-auth`/`googleapiclient` are deliberately not used: the standalone binary
+  cannot import anything that is not already bundled.
