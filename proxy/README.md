@@ -50,41 +50,55 @@ python3 -m venv .venv-proxy && .venv-proxy/bin/pip install mitmproxy
 node test/proxy.js
 ```
 
-## URL log to Google Sheets
+## URL log
 
-Every page the filtered accounts visit is written to a Google Sheet:
-one tab per month named `MM-yyyy`, **row = URL, column = day of month, cell = number of hits**.
-Blocked attempts go to a parallel tab `MM-yyyy chan`.
+Every page the filtered accounts open is counted locally. Read it in the browser on that PC:
 
-Enable it at install time:
+* `http://kidproxy.local/log` - row = URL, column = day of month, cell = hits, with a month
+  picker and a separate table for blocked attempts. No account, no key, nothing to set up.
+* `http://kidproxy.local/log.csv` - the same month as CSV, for Excel or Sheets.
 
-```powershell
-.\install.ps1 -LogSheetId 1VtlZ1FJ...9VCs -LogCredentials .\kidproxy-sheets.json
-```
-
-`kidproxy.json` keys (under `urlLog`):
+The installer turns this on by default. Config lives under `urlLog` in `kidproxy.json`:
 
 | key | default | meaning |
 |---|---|---|
-| `enabled` | `false` | master switch |
-| `sheetId` | `""` | target spreadsheet |
-| `credentials` | `kidproxy-sheets.json` | service-account key, relative to the install dir |
-| `flushSeconds` | `300` | how often the buffer is pushed (1–3 API calls per push) |
-| `sheetAllRequests` | `false` | `false` = only page navigations reach the sheet |
-| `localFile` | `""` | path to a JSONL of **every** request, including sub-resources |
+| `enabled` | `true` (set by the installer) | count URLs and serve `/log` |
+| `localFile` | `""` | path to a JSONL of **every** request, sub-resources included |
+| `localMaxMB` | `20` | rotate that JSONL at this size (one generation kept) |
+| `sheetAllRequests` | `false` | `false` = only page navigations are counted |
+| `sheetId` | `""` | set it, and the counts are mirrored to a Google Sheet too |
+| `credentials` | `kidproxy-sheets.json` | service-account key for that mirror |
+| `flushSeconds` | `300` | how often the mirror is pushed (1-3 API calls) |
 
-Notes:
+The row key is `host + path` plus only the params that identify a page (`v`, `list`, `q`,
+`search_query`), so `youtube.com/watch?v=...` stays distinguishable without the URL
+cardinality exploding. Counts persist in `urllog-state.json` as totals, so a failed push or
+a reboot never loses or double-counts a hit.
 
-* Counts are held locally in `urllog-state.json` and pushed as totals, so a failed push
-  or a reboot never loses or double-counts a hit.
-* The row key is `host + path` plus only the params that identify a page (`v`, `list`,
-  `q`, `search_query`), so `youtube.com/watch?v=...` stays distinguishable without the
-  URL cardinality exploding.
-* `http://kidproxy.local/update` pushes the log immediately as well as re-reading the lists.
-* Use a **dedicated** service account. The key sits on the kid's PC; anything else that
-  account can reach is reachable from there too.
-* Sheets allows 10M cells per workbook. At ~2k URLs/month that is years of headroom,
-  but archive to a new workbook yearly if the kid is a heavy browser.
-* Google's JWT signing uses `cryptography`, which ships inside `mitmdump.exe`.
-  `google-auth`/`googleapiclient` are deliberately not used: the standalone binary
-  cannot import anything that is not already bundled.
+### Optional: mirror into Google Sheets
+
+Only needed to read the log **away from that PC**. One tab per month `MM-yyyy`, same shape,
+blocked attempts in `MM-yyyy chan`.
+
+```powershell
+.\install.ps1 -LogSheetId <spreadsheet id>          # expects .\kidproxy-sheets.json
+```
+
+Create a service account in its **own** GCP project with no IAM roles, enable the Sheets API,
+and share the spreadsheet with its address as Editor - sharing is what grants access, not a
+project role. The key file ends up on the kid's PC, so anything else that account can reach
+is reachable from there.
+
+JWT signing uses `cryptography`, which ships inside `mitmdump.exe`. `google-auth` and
+`googleapiclient` are deliberately unused: the standalone binary cannot import anything that
+is not already bundled.
+
+### Note for anyone editing kidproxy.py
+
+mitmproxy loads the script as **several independent modules**. Module-level globals are
+per-load, not per-process, and the addon instance that serves a request may not be the one
+whose thread did the work. Anything singular (the allowlist, the URL counts, the Sheets
+transport, the background threads) must live on `_shared`, the object parked in
+`sys.modules["__kidproxy_shared__"]`. Guarding a thread start with a module-level flag
+silently leaves other copies with an empty allowlist, which fails closed and blocks
+everything.

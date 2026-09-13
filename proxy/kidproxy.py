@@ -12,10 +12,26 @@ Run:  mitmdump -s kidproxy.py --listen-host 127.0.0.1 --listen-port 8080
 Config: kidproxy.json next to this file (optional), keys: sitesUrl, channelsUrl,
         refreshSeconds, exemptUsers (list), enforceUsers (list, overrides admin check).
 """
-import csv, io, json, os, re, sys, threading, time, urllib.request, urllib.parse, subprocess, platform
+import csv, io, json, os, re, sys, threading, time, types, urllib.request, urllib.parse, subprocess, platform
 from mitmproxy import http, ctx
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+
+# mitmproxy loads this script as SEVERAL independent modules. Module-level globals are
+# therefore per-load, not per-process: each copy would refresh its own list, and only the
+# copy whose addon instance serves a request decides that request. Everything that must be
+# singular lives on one object parked in sys.modules instead.
+_shared = sys.modules.get("__kidproxy_shared__")
+if _shared is None:
+    _shared = types.ModuleType("__kidproxy_shared__")
+    _shared.lists = None
+    _shared.lock = threading.Lock()
+    _shared.counts = None
+    _shared.sheet = None
+    _shared.refresher = False
+    _shared.urllog = False
+    _shared.start_lock = threading.Lock()
+    sys.modules["__kidproxy_shared__"] = _shared
 DEFAULTS = {
     "sitesUrl": "https://docs.google.com/spreadsheets/d/1VtlZ1FJlUmRQ3VDx7Gzlve7LZ-oHo79P9iFbNj-9VCs/export?format=csv&gid=0",
     "channelsUrl": "https://docs.google.com/spreadsheets/d/1VtlZ1FJlUmRQ3VDx7Gzlve7LZ-oHo79P9iFbNj-9VCs/export?format=csv&gid=1729222840",
@@ -38,6 +54,7 @@ DEFAULTS = {
         "flushSeconds": 300,
         "sheetAllRequests": False,   # False = only page navigations reach the sheet
         "localFile": "",             # set a path to also keep a JSONL of EVERY request
+        "localMaxMB": 20,            # rotate that JSONL at this size (one generation kept)
     },
 }
 CFG = dict(DEFAULTS)
@@ -80,8 +97,10 @@ class Lists:
     last_ok = 0
     last_err = ""
 
-L = Lists()
-lock = threading.Lock()
+if _shared.lists is None:
+    _shared.lists = Lists()
+L = _shared.lists
+lock = _shared.lock
 
 def _fetch(url):
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))  # never via ourselves
@@ -201,8 +220,52 @@ def _publish(d, p, h, i):
 
 # ---------------------------------------------------------------- URL log
 KEEP_PARAMS = ("v", "list", "q", "search_query")
-SL = None            # SheetLog, when enabled
 _local_log_lock = threading.Lock()
+MAX_DAYS = 31
+
+
+class Counts:
+    """tab -> url -> {day: hits}, persisted locally. The viewer reads it directly;
+    pushing it to Google Sheets is optional and layered on top."""
+
+    def __init__(self, path, log=print):
+        self.path, self.log = path, log
+        self.lock = threading.Lock()
+        self.totals, self.rows, self.dirty = {}, {}, {}
+        try:
+            with open(path, encoding="utf-8") as f:
+                st = json.load(f)
+            self.totals, self.rows = st.get("totals", {}), st.get("rows", {})
+        except Exception:
+            pass
+
+    def record(self, tab, url, day):
+        with self.lock:
+            t = self.totals.setdefault(tab, {}).setdefault(url, {})
+            k = str(day)
+            t[k] = t.get(k, 0) + 1
+            self.dirty.setdefault(tab, set()).add(day)
+
+    def save(self):
+        try:
+            with self.lock:
+                blob = json.dumps({"totals": self.totals, "rows": self.rows}, ensure_ascii=False)
+            tmp = self.path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                f.write(blob)
+            os.replace(tmp, self.path)
+        except Exception as e:
+            self.log(f"url log: cannot save counts: {e}")
+
+    def months(self):
+        with self.lock:
+            return sorted({t[:7] for t in self.totals}, reverse=True)
+
+    def grid(self, tab):
+        """[(url, {day: n}, total)] sorted by total, busiest first."""
+        with self.lock:
+            rows = [(u, dict(d), sum(d.values())) for u, d in self.totals.get(tab, {}).items()]
+        return sorted(rows, key=lambda r: (-r[2], r[0]))
 
 
 def _log_url(req):
@@ -223,8 +286,12 @@ def _local_append(rec):
     if not path:
         return
     try:
-        with _local_log_lock, open(path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        cap = int(CFG["urlLog"].get("localMaxMB", 20)) * 1024 * 1024
+        with _local_log_lock:
+            if cap and os.path.exists(path) and os.path.getsize(path) > cap:
+                os.replace(path, path + ".1")     # keep one generation, never grow forever
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
     except Exception:
         pass
 
@@ -242,10 +309,10 @@ def record_url(flow, blocked, user=None, nav=None):
         now = time.localtime()
         _local_append({"t": time.strftime("%Y-%m-%d %H:%M:%S", now), "user": user, "url": url,
                        "blocked": bool(blocked), "nav": bool(nav)})
-        if SL is None or not (nav or ul.get("sheetAllRequests")):
+        if _shared.counts is None or not (nav or ul.get("sheetAllRequests")):
             return
         tab = time.strftime("%m-%Y", now)
-        SL.record(tab + " chan" if blocked else tab, url, now.tm_mday)
+        _shared.counts.record(tab + " chan" if blocked else tab, url, now.tm_mday)
     except Exception as e:
         log(f"url log error: {e}")
 
@@ -255,7 +322,7 @@ def _url_log_flusher():
     while True:
         time.sleep(every)
         try:
-            n = SL.flush()
+            n = _shared.sheet.flush()
             if n:
                 log(f"url log: pushed {n} rows")
         except Exception as e:
@@ -263,28 +330,43 @@ def _url_log_flusher():
 
 
 def _start_url_log():
-    global SL
     ul = CFG["urlLog"]
     if not ul.get("enabled"):
         return
+    with _shared.start_lock:
+        if _shared.urllog:
+            return
+        _shared.urllog = True
+    _shared.counts = Counts(os.path.join(HERE, "urllog-state.json"), log)
+    threading.Thread(target=_counts_saver, daemon=True).start()
+    log("url log: on - http://kidproxy.local/log")
+
+    # Optional: also mirror it into a Google Sheet. Drop a service-account key in and
+    # set sheetId to turn this on later; nothing else changes.
     if not ul.get("sheetId"):
-        log("url log: enabled but sheetId is empty - disabled")
         return
     cred = ul.get("credentials") or ""
     if not os.path.isabs(cred):
         cred = os.path.join(HERE, cred)
     if not os.path.exists(cred):
-        log(f"url log: credentials not found at {cred} - disabled")
+        log(f"url log: sheet mirror off, no key at {cred}")
         return
     try:
         sys.path.insert(0, HERE)
         from sheetlog import SheetLog
-        SL = SheetLog(ul["sheetId"], cred, os.path.join(HERE, "urllog-state.json"), log)
+        _shared.sheet = SheetLog(ul["sheetId"], cred, _shared.counts, log)
     except Exception as e:
-        log(f"url log: cannot start ({e}) - disabled")
+        log(f"url log: sheet mirror off ({e})")
         return
     threading.Thread(target=_url_log_flusher, daemon=True).start()
-    log(f"url log: on, sheet {ul['sheetId']}, flush every {ul.get('flushSeconds')}s")
+    log(f"url log: mirroring to sheet {ul['sheetId']} every {ul.get('flushSeconds')}s")
+
+
+def _counts_saver():
+    while True:
+        time.sleep(60)
+        if _shared.counts is not None:
+            _shared.counts.save()
 
 
 # ---------------------------------------------------------------- manual refresh
@@ -316,8 +398,96 @@ def _control_stats():
     return "\n".join(lines)
 
 
+
+LOG_HTML = """<!doctype html><html lang="vi"><meta charset="utf-8"><title>KidProxy - nhật ký</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+ body{{margin:0;font-family:system-ui,sans-serif;background:#f4f5f7;color:#222;padding:24px}}
+ h1{{font-size:20px;margin:0 0 4px}} h2{{font-size:15px;margin:28px 0 8px}}
+ .sub{{color:#666;font-size:13px;margin:0 0 16px}}
+ .m a{{display:inline-block;margin:0 6px 6px 0;padding:5px 11px;border-radius:7px;background:#fff;
+      border:1px solid #dcdfe4;color:#1a73e8;text-decoration:none;font-size:13px}}
+ .m a.on{{background:#1a73e8;color:#fff;border-color:#1a73e8}}
+ .wrap{{overflow-x:auto;background:#fff;border-radius:10px;box-shadow:0 1px 4px rgba(0,0,0,.07)}}
+ table{{border-collapse:collapse;font-size:13px;width:100%}}
+ th,td{{padding:6px 9px;border-bottom:1px solid #eef0f2;text-align:right;white-space:nowrap}}
+ th:first-child,td:first-child{{text-align:left;position:sticky;left:0;background:#fff;
+      max-width:520px;overflow:hidden;text-overflow:ellipsis}}
+ thead th{{background:#fafbfc;position:sticky;top:0;font-weight:600;color:#555}}
+ td.z{{color:#dfe2e6}} .tot{{font-weight:600}} .today{{background:#fff7e6}}
+ .none{{color:#777;font-size:13px;padding:14px}}
+ .bar{{margin:0 0 18px}} .bar a{{color:#1a73e8;font-size:13px;margin-right:14px}}
+</style>
+<body>
+<h1>Nhật ký truy cập</h1>
+<p class="sub">Mỗi dòng là một trang, mỗi cột là một ngày trong tháng.</p>
+<div class="m">{months}</div>
+<div class="bar"><a href="http://kidproxy.local/log.csv?m={month}">Tải CSV tháng này</a>
+<a href="http://kidproxy.local/update">Cập nhật danh sách</a></div>
+{tables}
+</body></html>"""
+
+
+def _esc(t):
+    return (t.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;"))
+
+
+def _log_table(tab, today):
+    rows = _shared.counts.grid(tab) if _shared.counts else []
+    if not rows:
+        return '<div class="wrap"><div class="none">Chưa có dữ liệu.</div></div>'
+    days = sorted({int(d) for _, dd, _ in rows for d in dd})
+    head = "".join('<th class="%s">%d</th>' % ("today" if d == today else "", d) for d in days)
+    body = []
+    for url, dd, total in rows:
+        cells = "".join('<td class="%s">%s</td>' % (
+            ("today " if d == today else "") + ("" if dd.get(str(d)) else "z"),
+            dd.get(str(d), "\u00b7")) for d in days)
+        body.append("<tr><th>%s</th>%s<td class='tot'>%d</td></tr>" % (_esc(url), cells, total))
+    return ('<div class="wrap"><table><thead><tr><th>URL</th>%s<th>Tổng</th></tr></thead>'
+            "<tbody>%s</tbody></table></div>" % (head, "".join(body)))
+
+
+def log_page(query):
+    now = time.localtime()
+    cur = time.strftime("%m-%Y", now)
+    want = (urllib.parse.parse_qs(query).get("m") or [cur])[0]
+    have = _shared.counts.months() if _shared.counts else []
+    if cur not in have:
+        have = [cur] + have
+    if want not in have:
+        want = have[0]
+    months = "".join('<a class="%s" href="http://kidproxy.local/log?m=%s">%s</a>'
+                     % ("on" if m == want else "", m, m) for m in have)
+    today = now.tm_mday if want == cur else -1
+    tables = ("<h2>Đã vào</h2>" + _log_table(want, today) +
+              "<h2>Bị chặn</h2>" + _log_table(want + " chan", today))
+    body = LOG_HTML.format(months=months, month=want, tables=tables).encode("utf-8")
+    return http.Response.make(200, body, {"Content-Type": "text/html; charset=utf-8",
+                                          "Cache-Control": "no-store"})
+
+
+def log_csv(query):
+    want = (urllib.parse.parse_qs(query).get("m") or [time.strftime("%m-%Y")])[0]
+    out = io.StringIO()
+    w = csv.writer(out)
+    w.writerow(["Loại", "URL"] + [str(d) for d in range(1, MAX_DAYS + 1)] + ["Tổng"])
+    for label, tab in (("Đã vào", want), ("Bị chặn", want + " chan")):
+        for url, dd, total in (_shared.counts.grid(tab) if _shared.counts else []):
+            w.writerow([label, url] + [dd.get(str(d), "") for d in range(1, MAX_DAYS + 1)] + [total])
+    return http.Response.make(200, out.getvalue().encode("utf-8-sig"),
+                              {"Content-Type": "text/csv; charset=utf-8",
+                               "Content-Disposition": 'attachment; filename="kidproxy-%s.csv"' % want,
+                               "Cache-Control": "no-store"})
+
+
 def control_response(path, accept=""):
     p = path.split("?")[0].rstrip("/") or "/"
+    q = path.split("?", 1)[1] if "?" in path else ""
+    if p == "/log":
+        return log_page(q)
+    if p in ("/log.csv", "/logcsv"):
+        return log_csv(q)
     if p in ("/update", "/refresh"):
         now = time.time()
         waited = now - _last_manual[0]
@@ -329,9 +499,9 @@ def control_response(path, accept=""):
             with lock:
                 before = set(L.domains)
             refresh()
-            if SL is not None:
+            if _shared.sheet is not None:
                 try:
-                    SL.flush()
+                    _shared.sheet.flush()
                 except Exception as e:
                     log(f"url log push failed: {e}")
             with lock:
@@ -342,7 +512,7 @@ def control_response(path, accept=""):
                 title = "Đã cập nhật danh sách"
                 sub = ("Mới thêm: " + ", ".join(added)) if added else "Không có thay đổi mới."
     else:
-        title, sub = "KidProxy", "Mở http://kidproxy.local/update để tải lại danh sách ngay."
+        title, sub = "KidProxy", "/update để tải lại danh sách, /log để xem nhật ký truy cập."
     stats = _control_stats()
     if "text/html" in (accept or "").lower():
         body = CONTROL_HTML.format(title=title, sub=sub, stats=stats).encode("utf-8")
@@ -661,20 +831,14 @@ def _rewrite_initial_data(body, stats):
     data = filter_json(data, stats)
     return body[:m.start(2)] + json.dumps(data, separators=(",", ":")) + body[m.end(2):]
 
-_start_lock = threading.Lock()
-
-
 # ---------------------------------------------------------------- mitmproxy hooks
 class KidProxy:
     def load(self, loader):
-        # mitmproxy re-executes the script as a SEPARATE module when it sees a fresh mtime,
-        # so a module-level flag is useless here - os.environ is shared by the whole process.
-        # Without this we get one refresher thread and one sheet flusher per load, and the
-        # flushers overwrite each other's counts.
-        with _start_lock:
-            if os.environ.get("KIDPROXY_STARTED") == str(os.getpid()): return
-            os.environ["KIDPROXY_STARTED"] = str(os.getpid())
-        threading.Thread(target=_refresher, daemon=True).start()
+        with _shared.start_lock:
+            first = not _shared.refresher
+            _shared.refresher = True
+        if first:                       # shared L, so one refresher serves every loaded copy
+            threading.Thread(target=_refresher, daemon=True).start()
         _start_url_log()
         log(f"started; enforceUsers={CFG['enforceUsers'] or 'all non-admins'} exempt={CFG['exemptUsers']}")
 

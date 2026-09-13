@@ -8,7 +8,7 @@ Deliberately stdlib + `cryptography` only: KidProxy runs inside the standalone m
 a frozen bundle where pip install is impossible. `cryptography` is a mitmproxy dependency so
 it is always present; google-auth / googleapiclient are not.
 """
-import base64, json, os, threading, time, urllib.error, urllib.parse, urllib.request
+import base64, json, time, urllib.error, urllib.parse, urllib.request
 
 TOKEN_URL = "https://oauth2.googleapis.com/token"
 API = "https://sheets.googleapis.com/v4/spreadsheets"
@@ -35,15 +35,11 @@ def col_name(idx):
 
 
 class SheetLog:
-    def __init__(self, sheet_id, cred_path, state_path, log=print):
-        self.sheet_id, self.cred_path, self.state_path, self.log = sheet_id, cred_path, state_path, log
-        self.lock = threading.Lock()
-        self.totals = {}        # tab -> url -> {day(str): count}
-        self.rows = {}          # tab -> [url, ...] in sheet row order
-        self.dirty = {}         # tab -> set(day)
+    def __init__(self, sheet_id, cred_path, counts, log=print):
+        self.sheet_id, self.cred_path, self.log = sheet_id, cred_path, log
+        self.counts = counts          # the Counts store; this class is only a transport
         self._tok = (None, 0)
         self._creds = None
-        self._load_state()
 
     # ------------------------------------------------------------------ auth
     def _cred(self):
@@ -83,29 +79,6 @@ class SheetLog:
         h = {"Authorization": "Bearer " + self._token(), "Content-Type": "application/json"}
         return json.loads(self._raw(url, method, data, h) or "{}")
 
-    # ------------------------------------------------------------------ local state
-    def _load_state(self):
-        try:
-            with open(self.state_path, encoding="utf-8") as f:
-                st = json.load(f)
-            self.totals, self.rows = st.get("totals", {}), st.get("rows", {})
-        except Exception:
-            pass
-
-    def _save_state(self):
-        tmp = self.state_path + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump({"totals": self.totals, "rows": self.rows}, f, ensure_ascii=False)
-        os.replace(tmp, self.state_path)
-
-    # ------------------------------------------------------------------ record
-    def record(self, tab, url, day):
-        with self.lock:
-            t = self.totals.setdefault(tab, {}).setdefault(url, {})
-            k = str(day)
-            t[k] = t.get(k, 0) + 1
-            self.dirty.setdefault(tab, set()).add(day)
-
     # ------------------------------------------------------------------ push
     def _tabs(self):
         meta = self._api("", params={"fields": "sheets.properties.title"})
@@ -122,24 +95,25 @@ class SheetLog:
     def _sync_rows(self, tab, existing):
         if tab not in existing:
             self._create_tab(tab)
-            self.rows[tab] = []
+            self.counts.rows[tab] = []
             return
         got = self._api("/values/" + urllib.parse.quote(a1(tab, "A2:A"))).get("values", [])
-        self.rows[tab] = [r[0] for r in got if r and r[0]]
+        self.counts.rows[tab] = [r[0] for r in got if r and r[0]]
 
     def flush(self):
-        with self.lock:
-            dirty = {t: set(d) for t, d in self.dirty.items() if d}
-            snapshot = {t: {u: dict(v) for u, v in self.totals.get(t, {}).items()} for t in dirty}
+        c = self.counts
+        with c.lock:
+            dirty = {t: set(d) for t, d in c.dirty.items() if d}
+            snapshot = {t: {u: dict(v) for u, v in c.totals.get(t, {}).items()} for t in dirty}
         if not dirty:
             return 0
         existing = self._tabs()
         pushed = 0
         for tab, days in dirty.items():
             urls = snapshot[tab]
-            if tab not in self.rows or tab not in existing:
+            if tab not in c.rows or tab not in existing:
                 self._sync_rows(tab, existing)
-            order = self.rows.setdefault(tab, [])
+            order = c.rows.setdefault(tab, [])
             known = set(order)
             new = [u for u in urls if u not in known]
             if new:
@@ -155,8 +129,7 @@ class SheetLog:
             if ranges:
                 self._api("/values:batchUpdate", "POST", {"valueInputOption": "RAW", "data": ranges})
             pushed += len(urls)
-            with self.lock:
-                self.dirty[tab] -= days
-        with self.lock:
-            self._save_state()
+            with c.lock:
+                c.dirty[tab] -= days
+        c.save()
         return pushed

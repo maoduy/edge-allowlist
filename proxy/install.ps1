@@ -9,9 +9,9 @@ What it does
   1. Installs mitmproxy (mitmdump.exe) + kidproxy.py into C:\Program Files\KidProxy (admin-only folder)
   2. Runs it as a SYSTEM scheduled task at boot (+ a 5-minute watchdog). Standard users cannot stop it.
   3. Trusts the proxy's certificate machine-wide (needed to inspect youtube.com for the channel filter)
-  4. Optionally logs every URL the filtered accounts visit into a Google Sheet:
-     one tab per month "MM-yyyy", row = URL, column = day, cell = number of hits
-     (blocked attempts land in "MM-yyyy chan").  Pass -LogSheetId <id>.
+  4. Logs every page the filtered accounts visit, readable at http://kidproxy.local/log
+     (row = URL, column = day, cell = number of hits; blocked attempts listed separately).
+     Pass -LogSheetId <id> to also mirror it into a Google Sheet, one tab per month "MM-yyyy".
   5. Forces Google as the default search provider and new tab page (Bing is not on the allowlist).
   6. Points Edge, Chrome and the Windows system proxy at 127.0.0.1:8080 by policy, locks the proxy UI,
      blocks extensions / DevTools / InPrivate so the proxy cannot be bypassed from inside the browser.
@@ -56,13 +56,19 @@ $cmd = Get-Content (Join-Path $PSScriptRoot "kidproxy.cmd") -Raw
 $cmd -replace 'set PORT=8080', "set PORT=$Port" |
   Set-Content -Path "$env:SystemRoot\System32\kidproxy.cmd" -Encoding ASCII
 $cfg = @{ exemptUsers = @($ExemptUsers); enforceUsers = @($EnforceUsers); logFile = "$Dir\kidproxy.log" }
+# URL logging is local by default - read it at http://kidproxy.local/log, no account needed.
+$cfg.urlLog = @{ enabled = $true; flushSeconds = 300; sheetAllRequests = $false;
+                 localFile = "$Dir\urls.jsonl"; localMaxMB = 20 }
 if ($LogSheetId) {
+  # Optional mirror into Google Sheets, for reading the log away from this PC.
   if (-not $LogCredentials) { $LogCredentials = Join-Path $PSScriptRoot "kidproxy-sheets.json" }
-  if (-not (Test-Path $LogCredentials)) { throw "URL log needs a service-account key: $LogCredentials not found." }
+  if (-not (Test-Path $LogCredentials)) { throw "The sheet mirror needs a service-account key: $LogCredentials not found." }
   Copy-Item $LogCredentials "$Dir\kidproxy-sheets.json" -Force
-  $cfg.urlLog = @{ enabled = $true; sheetId = $LogSheetId; credentials = "kidproxy-sheets.json";
-                   flushSeconds = 300; sheetAllRequests = $false; localFile = "$Dir\urls.jsonl" }
-  Write-Host "URL log -> sheet $LogSheetId"
+  $cfg.urlLog.sheetId = $LogSheetId
+  $cfg.urlLog.credentials = "kidproxy-sheets.json"
+  Write-Host "URL log -> local + sheet $LogSheetId"
+} else {
+  Write-Host "URL log -> local only (http://kidproxy.local/log)"
 }
 $cfg | ConvertTo-Json -Depth 5 | Set-Content -Path "$Dir\kidproxy.json" -Encoding UTF8
 
