@@ -48,7 +48,7 @@ jobs:
         shell: pwsh
         run: |
           pyinstaller --noconfirm --clean --onefile --windowed --uac-admin `
-            --name "KidNest Setup" `
+            --name "KidNest-Setup" `
             --add-data "payload\install.ps1;." `
             --add-data "payload\uninstall.ps1;." `
             --add-data "payload\kidproxy.py;." `
@@ -60,7 +60,7 @@ jobs:
       - name: Check the result
         shell: pwsh
         run: |
-          $exe = "dist\KidNest Setup.exe"
+          $exe = "dist\KidNest-Setup.exe"
           if (-not (Test-Path $exe)) { throw "build produced no exe" }
           $mb = [math]::Round((Get-Item $exe).Length / 1MB, 1)
           Write-Host "Built $exe  ($mb MB)"
@@ -69,7 +69,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: KidNest-Setup
-          path: dist/KidNest Setup.exe
+          path: dist/KidNest-Setup.exe
           retention-days: 90
 
       - name: Publish as the 'latest' release
@@ -79,6 +79,6 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release delete latest --yes --cleanup-tag 2>$null
-          gh release create latest "dist\KidNest Setup.exe" `
+          gh release create latest "dist\KidNest-Setup.exe" `
             --title "KidNest Setup (latest)" `
             --notes "One-click installer. Download, run, paste your Google Sheet link, pick the accounts to protect.`n`nBuilt from $env:GITHUB_SHA."
