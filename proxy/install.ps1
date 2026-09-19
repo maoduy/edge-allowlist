@@ -77,13 +77,23 @@ $exe = "$Dir\mitmdump.exe"
 $arg = "--listen-host 127.0.0.1 --listen-port $Port --set confdir=`"$Dir\ca`" -s `"$Dir\kidproxy.py`" -q"
 $action = New-ScheduledTaskAction -Execute $exe -Argument $arg
 $trigger = New-ScheduledTaskTrigger -AtStartup
+try { $trigger.Delay = "PT15S" } catch {}          # let the network come up first
+$trigger2 = New-ScheduledTaskTrigger -AtLogOn      # belt and braces if AtStartup is missed
 $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 99 -RestartInterval (New-TimeSpan -Minutes 1) `
   -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -MultipleInstances IgnoreNew
 $principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
-Register-ScheduledTask -TaskName "KidProxy" -Action $action -Trigger $trigger -Settings $settings -Principal $principal -Force | Out-Null
+Register-ScheduledTask -TaskName "KidProxy" -Action $action -Trigger $trigger,$trigger2 -Settings $settings -Principal $principal -Force | Out-Null
 $wd = New-ScheduledTaskAction -Execute "schtasks.exe" -Argument "/Run /TN KidProxy"
-$wdt = New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes 5)
-Register-ScheduledTask -TaskName "KidProxy Watchdog" -Action $wd -Trigger $wdt -Settings (New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes 1)) -Principal $principal -Force | Out-Null
+# A -Once trigger whose start time is in the past does NOT resume after a reboot, so the
+# watchdog stopped running the moment the PC was restarted. Repeat off a daily trigger and
+# fire at startup as well.
+$wdt = New-ScheduledTaskTrigger -Daily -At (Get-Date).Date.AddMinutes(1)
+$wdt.Repetition = (New-ScheduledTaskTrigger -Once -At (Get-Date) `
+  -RepetitionInterval (New-TimeSpan -Minutes 5) -RepetitionDuration (New-TimeSpan -Days 1)).Repetition
+$wdt2 = New-ScheduledTaskTrigger -AtStartup
+$wdSet = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes 1) -StartWhenAvailable `
+  -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew
+Register-ScheduledTask -TaskName "KidProxy Watchdog" -Action $wd -Trigger $wdt,$wdt2 -Settings $wdSet -Principal $principal -Force | Out-Null
 Start-ScheduledTask -TaskName "KidProxy"
 
 # 4. trust the proxy CA machine-wide

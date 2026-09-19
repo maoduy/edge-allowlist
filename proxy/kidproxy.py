@@ -28,6 +28,7 @@ if _shared is None:
     _shared.lock = threading.Lock()
     _shared.counts = None
     _shared.sheet = None
+    _shared.usage = None
     _shared.refresher = False
     _shared.urllog = False
     _shared.start_lock = threading.Lock()
@@ -81,11 +82,14 @@ SYSTEM_USERS = {"system", "local service", "network service"}
 
 def log(msg):
     line = time.strftime("%Y-%m-%d %H:%M:%S ") + msg
-    print("kidproxy:", msg)
-    if CFG.get("logFile"):
+    if CFG.get("logFile"):                    # file first: it is the only log a SYSTEM task has
         try:
             with open(CFG["logFile"], "a", encoding="utf-8") as f: f.write(line + "\n")
         except Exception: pass
+    try:
+        print("kidproxy:", msg)
+    except Exception:
+        pass          # no console under Task Scheduler -> stdout is an invalid handle
 
 # ---------------------------------------------------------------- lists
 class Lists:
@@ -93,6 +97,7 @@ class Lists:
     paths: list = []
     handles: set = set()
     ids: set = set()
+    limits: dict = {}        # domain -> minutes allowed per day (0 / missing = unlimited)
     loaded = False
     last_ok = 0
     last_err = ""
@@ -116,6 +121,44 @@ def _first_col(text):
         if not v or v.startswith("#") or v.lower() in HEADERS: continue
         out.append(v)
     return out
+
+def _parse_minutes(cell):
+    """Column C of the websites tab -> minutes. '30' and '30 phút' are 30 minutes; '1h',
+    '1 giờ' and '60' are an hour; '1:30' and '1h30' are 90. Blank or 0 means no limit."""
+    c = (cell or "").strip().lower()
+    if not c:
+        return 0
+    m = re.match(r"^(\d+)\s*[:h]\s*(\d+)\s*$", c)
+    if m:
+        return int(m.group(1)) * 60 + int(m.group(2))
+    m = re.search(r"(\d+(?:[.,]\d+)?)", c)
+    if not m:
+        return 0
+    n = float(m.group(1).replace(",", "."))
+    unit = c[m.end():]                     # only what FOLLOWS the number is the unit:
+    if re.search(r"ph[uú]t|min", unit):    # "30 phút" must not read as hours because of its h
+        pass
+    elif re.search(r"gi[ờo]|hour|h", unit):
+        n *= 60
+    return int(round(n))
+
+
+def _sites_with_limits(text):
+    sites, limits = [], {}
+    for row in csv.reader(io.StringIO(text)):
+        if not row:
+            continue
+        v = row[0].strip()
+        if not v or v.startswith("#") or v.lower() in HEADERS:
+            continue
+        sites.append(v)
+        mins = _parse_minutes(row[2] if len(row) > 2 else "")
+        if mins:
+            kind, dom = _norm_site(v)
+            if kind == "domain":
+                limits[dom] = mins
+    return sites, limits
+
 
 def _norm_site(s):
     s = s.strip().lower()
@@ -178,7 +221,7 @@ def resolve_handle(handle):
 
 def refresh():
     try:
-        sites = _first_col(_fetch(CFG["sitesUrl"]))
+        sites, limits = _sites_with_limits(_fetch(CFG["sitesUrl"]))
         chans = _first_col(_fetch(CFG["channelsUrl"]))
     except Exception as e:
         L.last_err = str(e)
@@ -194,7 +237,7 @@ def refresh():
     # Publish the site list FIRST. host_allowed() fails closed until the first publish, and
     # resolving @handles costs a network round trip each - doing that first left every site
     # blocked for a minute after every start, watchdog restart and reboot.
-    _publish(d, p, h, i)
+    _publish(d, p, h, i, limits)
     added = False
     for hd in sorted(h):
         cid = resolve_handle(hd)
@@ -202,10 +245,10 @@ def refresh():
             i.add(cid); added = True
     if added:
         _save_id_cache()
-        _publish(d, p, h, i)
+        _publish(d, p, h, i, limits)
 
 
-def _publish(d, p, h, i):
+def _publish(d, p, h, i, limits=None):
     # hosts needed to keep the sheet itself, the YouTube player and bot checks (which send no referer) working
     dd = set(d)
     for extra in ("docs.google.com", "googleusercontent.com", "googlevideo.com", "ytimg.com", "ggpht.com", "gstatic.com", "googleapis.com",
@@ -215,8 +258,12 @@ def _publish(d, p, h, i):
         dd.update({"youtube.com", "youtube-nocookie.com"})
     with lock:
         L.domains, L.paths, L.handles, L.ids = dd, list(p), set(h), set(i)
+        if limits is not None:
+            L.limits = dict(limits)
         L.loaded, L.last_ok, L.last_err = True, time.time(), ""
-    log(f"lists loaded: {len(dd)} domains, {len(p)} paths, {len(h)} handles, {len(i)} channel ids")
+    lim = " ".join("%s=%dm" % kv for kv in sorted((limits or L.limits).items()))
+    log(f"lists loaded: {len(dd)} domains, {len(p)} paths, {len(h)} handles, {len(i)} channel ids"
+        + (f", limits: {lim}" if lim else ""))
 
 # ---------------------------------------------------------------- URL log
 KEEP_PARAMS = ("v", "list", "q", "search_query")
@@ -362,6 +409,13 @@ def _start_url_log():
     log(f"url log: mirroring to sheet {ul['sheetId']} every {ul.get('flushSeconds')}s")
 
 
+def _usage_saver():
+    while True:
+        time.sleep(60)
+        if _shared.usage is not None:
+            _shared.usage.save()
+
+
 def _counts_saver():
     while True:
         time.sleep(60)
@@ -385,6 +439,16 @@ CONTROL_HTML = """<!doctype html><html lang="vi"><meta charset="utf-8"><title>Ki
 </div></body></html>"""
 
 
+def _usage_lines():
+    """[(domain, used, cap)] for every site that has a daily budget."""
+    with lock:
+        caps = dict(L.limits)
+    if not caps or _shared.usage is None:
+        return []
+    today = _shared.usage.today()
+    return [(d, today.get(d, 0), c) for d, c in sorted(caps.items())]
+
+
 def _control_stats():
     with lock:
         n_d, n_p, n_i, ok, err = len(L.domains), len(L.paths), len(L.ids), L.last_ok, L.last_err
@@ -395,6 +459,8 @@ def _control_stats():
                  if ok else "chưa lần nào")]
     if err:
         lines.append("Lỗi                 : %s" % err)
+    for d, used, cap in _usage_lines():
+        lines.append("%-20s: %d/%d phút hôm nay" % (d, used, cap))
     return "\n".join(lines)
 
 
@@ -460,7 +526,15 @@ def log_page(query):
     months = "".join('<a class="%s" href="http://kidproxy.local/log?m=%s">%s</a>'
                      % ("on" if m == want else "", m, m) for m in have)
     today = now.tm_mday if want == cur else -1
-    tables = ("<h2>Đã vào</h2>" + _log_table(want, today) +
+    budget = ""
+    rows = _usage_lines() if want == cur else []
+    if rows:
+        budget = ("<h2>Thời gian hôm nay</h2><div class='wrap'><table><thead><tr>"
+                  "<th>Trang</th><th>Đã dùng</th><th>Giới hạn</th><th>Còn lại</th></tr></thead><tbody>"
+                  + "".join("<tr><th>%s</th><td>%d</td><td>%d</td><td class='tot'>%d</td></tr>"
+                            % (_esc(d), u, c, max(0, c - u)) for d, u, c in rows)
+                  + "</tbody></table></div>")
+    tables = (budget + "<h2>Đã vào</h2>" + _log_table(want, today) +
               "<h2>Bị chặn</h2>" + _log_table(want + " chan", today))
     body = LOG_HTML.format(months=months, month=want, tables=tables).encode("utf-8")
     return http.Response.make(200, body, {"Content-Type": "text/html; charset=utf-8",
@@ -525,9 +599,99 @@ def control_response(path, accept=""):
 
 
 def _refresher():
+    # At boot the network is often not up yet. refresh() keeps the previous list on failure,
+    # but before the FIRST success there is no list and host_allowed() fails closed - so retry
+    # quickly until we have one instead of waiting out a full refresh interval.
+    delay = 5
     while True:
-        refresh()
-        time.sleep(max(60, int(CFG["refreshSeconds"])))
+        try:
+            refresh()
+        except Exception as e:
+            log(f"refresh crashed: {e}")
+        with lock:
+            loaded = L.loaded
+        if loaded:
+            delay = 5
+            time.sleep(max(60, int(CFG["refreshSeconds"])))
+        else:
+            log(f"no list yet, retrying in {delay}s")
+            time.sleep(delay)
+            delay = min(delay * 2, 120)
+
+class Usage:
+    """Which minutes of the day each limited site was active in. A minute counts once no
+    matter how many requests it held, so 30 minutes of YouTube means 30 distinct minutes."""
+
+    def __init__(self, path, log=print):
+        self.path, self.log = path, log
+        self.lock = threading.Lock()
+        self.days = {}                   # "YYYY-MM-DD" -> {domain: set(minute-of-day)}
+        try:
+            with open(path, encoding="utf-8") as f:
+                for day, doms in json.load(f).items():
+                    self.days[day] = {k: set(v) for k, v in doms.items()}
+        except Exception:
+            pass
+
+    def used(self, day, domain):
+        with self.lock:
+            return len(self.days.get(day, {}).get(domain, ()))
+
+    def has(self, day, domain, minute):
+        with self.lock:
+            return minute in self.days.get(day, {}).get(domain, ())
+
+    def touch(self, day, domain, minute):
+        with self.lock:
+            self.days.setdefault(day, {}).setdefault(domain, set()).add(minute)
+
+    def today(self):
+        day = time.strftime("%Y-%m-%d")
+        with self.lock:
+            return {k: len(v) for k, v in self.days.get(day, {}).items()}
+
+    def save(self):
+        keep = {time.strftime("%Y-%m-%d"), time.strftime("%Y-%m-%d", time.localtime(time.time() - 86400))}
+        try:
+            with self.lock:
+                for stale in [d for d in self.days if d not in keep]:
+                    del self.days[stale]
+                blob = json.dumps({d: {k: sorted(v) for k, v in doms.items()}
+                                   for d, doms in self.days.items()})
+            tmp = self.path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                f.write(blob)
+            os.replace(tmp, self.path)
+        except Exception as e:
+            self.log(f"usage: cannot save: {e}")
+
+
+def matched_domain(host):
+    """Which allowlist domain this host falls under, if any."""
+    host = (host or "").lower().rstrip(".")
+    with lock:
+        for d in L.domains:
+            if host == d or host.endswith("." + d):
+                return d
+    return None
+
+
+def limited_site(flow):
+    """(domain, minutes) of the limited site this request belongs to. The referer wins, so
+    the video stream on googlevideo.com counts against youtube.com, not against itself."""
+    h = flow.request.headers
+    ref = _hdr_host(h.get("referer", "")) or _hdr_host(h.get("origin", ""))
+    for cand in (ref, flow.request.host):
+        if not cand:
+            continue
+        d = matched_domain(cand)
+        if d:
+            with lock:
+                cap = L.limits.get(d, 0)
+            if cap:
+                return d, cap
+    return None, 0
+
 
 def host_allowed(host):
     host = (host or "").lower().rstrip(".")
@@ -839,6 +1003,8 @@ class KidProxy:
             _shared.refresher = True
         if first:                       # shared L, so one refresher serves every loaded copy
             threading.Thread(target=_refresher, daemon=True).start()
+            _shared.usage = Usage(os.path.join(HERE, "usage-state.json"), log)
+            threading.Thread(target=_usage_saver, daemon=True).start()
         _start_url_log()
         log(f"started; enforceUsers={CFG['enforceUsers'] or 'all non-admins'} exempt={CFG['exemptUsers']}")
 
@@ -892,9 +1058,35 @@ class KidProxy:
         elif CFG["blockShorts"] and (path.startswith("/shorts") or path.startswith("/youtubei/v1/reel/")):
             blocked = True
             flow.response = blocked_page("YouTube Shorts đã bị tắt", "") if path.startswith("/shorts") else http.Response.make(403, b"shorts blocked")
+        if not blocked:
+            blocked = self._meter(flow, nav)
         # a /watch page is only really "allowed" once the channel check in response() passes
         if not (host in YT_HOSTS and path.split("?")[0] == "/watch" and nav and not blocked):
             record_url(flow, blocked, user, nav)
+
+    def _meter(self, flow, nav):
+        """Daily time budget from column C of the websites tab. A minute counts once however
+        many requests it held, and a minute already paid for runs to its end."""
+        u = _shared.usage
+        if u is None:
+            return False
+        dom, cap = limited_site(flow)
+        if not dom:
+            return False
+        now = time.localtime()
+        day, minute = time.strftime("%Y-%m-%d", now), now.tm_hour * 60 + now.tm_min
+        used = u.used(day, dom)
+        if used < cap or u.has(day, dom, minute):
+            u.touch(day, dom, minute)
+            return False
+        if nav:
+            flow.response = blocked_page(
+                "Hết giờ cho %s hôm nay" % dom,
+                "Đã dùng %d/%d phút. Mai được dùng tiếp." % (used, cap))
+        else:
+            flow.response = http.Response.make(403, b"kidproxy: daily time limit reached")
+        log(f"LIMIT {dom} {used}/{cap}m ({flow.request.host})")
+        return True
 
     def response(self, flow: http.HTTPFlow):
         host, path = flow.request.host.lower(), flow.request.path
