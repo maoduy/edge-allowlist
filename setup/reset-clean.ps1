@@ -27,9 +27,21 @@ param(
 )
 
 $ErrorActionPreference = "Continue"
+# Admin only, by design: this is also the uninstaller, so a standard user must not be
+# able to run it. Re-launch elevated, which puts a UAC prompt in the way.
 if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
         ).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-  throw "Run this as Administrator."
+  $argv = @("-ExecutionPolicy", "Bypass", "-File", "`"$PSCommandPath`"")
+  if ($DryRun)   { $argv += "-DryRun" }
+  if ($BackupTo) { $argv += @("-BackupTo", "`"$BackupTo`"") }
+  try {
+    Start-Process powershell -Verb RunAs -ArgumentList $argv -ErrorAction Stop
+  } catch {
+    Write-Host "KidNest can only be removed by an administrator." -ForegroundColor Red
+    Start-Sleep 4
+    exit 1
+  }
+  exit 0
 }
 
 if (-not $BackupTo) {

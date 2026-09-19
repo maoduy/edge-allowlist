@@ -17,8 +17,9 @@ import urllib.request
 from tkinter import messagebox, ttk
 
 APP = "KidNest"
+INSTALL_DIR = os.path.join(os.environ.get("ProgramFiles", r"C:\Program Files"), "KidNest")
 PAYLOAD = ("install.ps1", "uninstall.ps1", "kidproxy.py", "sheetlog.py",
-           "kidproxy.cmd", "mitmdump.exe")
+           "kidproxy.cmd", "mitmdump.exe", "reset-clean.ps1")
 NOWINDOW = 0x08000000 if os.name == "nt" else 0
 
 
@@ -160,6 +161,8 @@ class Setup(tk.Tk):
         self.status.pack(side="left")
         self.btn = ttk.Button(bar, text="Cài đặt", command=self._install)
         self.btn.pack(side="right")
+        if os.path.exists(INSTALL_DIR):
+            ttk.Button(bar, text="Gỡ cài đặt", command=self._uninstall).pack(side="right", padx=(0, 8))
 
     # -------------------------------------------------- helpers
     def say(self, line):
@@ -223,6 +226,42 @@ class Setup(tk.Tk):
         self.btn.configure(state="disabled")
         self.status.configure(text="Đang cài đặt...")
         threading.Thread(target=self._run, args=(sid, chosen), daemon=True).start()
+
+    def _uninstall(self):
+        if not messagebox.askokcancel(
+                APP, "Gỡ KidNest và khôi phục mọi thiết lập của máy?\n\n"
+                     "Mọi thứ sẽ được sao lưu ra Desktop kèm restore.cmd trước khi xoá."):
+            return
+        self.btn.configure(state="disabled")
+        self.status.configure(text="Đang gỡ...")
+        threading.Thread(target=self._run_uninstall, daemon=True).start()
+
+    def _run_uninstall(self):
+        script = os.path.join(INSTALL_DIR, "reset-clean.ps1")
+        if not os.path.exists(script):
+            script = resource_path("reset-clean.ps1")     # fall back to our own copy
+        try:
+            self.say("> reset-clean.ps1")
+            proc = subprocess.Popen(
+                ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script],
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1,
+                creationflags=NOWINDOW)
+            for line in proc.stdout:
+                self.say(line)
+            rc = proc.wait()
+        except Exception as e:
+            self.say("LỖI: %s" % e)
+            rc = -1
+        self.after(0, self._done_uninstall, rc)
+
+    def _done_uninstall(self, rc):
+        self.btn.configure(state="normal")
+        if rc == 0:
+            self.status.configure(text="Đã gỡ.", fg="#176b3a")
+            messagebox.showinfo(APP, "Đã gỡ KidNest và khôi phục thiết lập.\n\n"
+                                     "Bản sao lưu nằm trên Desktop. Hãy khởi động lại máy.")
+        else:
+            self.status.configure(text="Gỡ thất bại (mã %s)." % rc, fg="#a00")
 
     def _run(self, sid, chosen):
         try:

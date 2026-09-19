@@ -75,6 +75,8 @@ Stop-Process -Name mitmdump -Force -ErrorAction SilentlyContinue
 Start-Sleep -Seconds 1
 Copy-Item (Join-Path $PSScriptRoot "kidproxy.py") $Dir -Force
 Copy-Item (Join-Path $PSScriptRoot "sheetlog.py") $Dir -Force
+$reset = Join-Path $PSScriptRoot "reset-clean.ps1"
+if (Test-Path $reset) { Copy-Item $reset $Dir -Force }        # doubles as the uninstaller
 # "kidproxy update" from any terminal, for standard users too
 $cmd = Get-Content (Join-Path $PSScriptRoot "kidproxy.cmd") -Raw
 $cmd -replace 'set PORT=8080', "set PORT=$Port" |
@@ -163,6 +165,20 @@ Set-ItemProperty -Path $is -Name ProxyOverride -Value "<local>"
 $ie = "HKLM:\SOFTWARE\Policies\Microsoft\Internet Explorer\Control Panel"
 New-Item -Path $ie -Force | Out-Null
 Set-ItemProperty -Path $ie -Name Proxy -Value 1 -Type DWord
+
+# 7. Add/Remove Programs entry - HKLM, so uninstalling needs an administrator
+$unKey = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\KidNest"
+if (Test-Path "$Dir\reset-clean.ps1") {
+  New-Item -Path $unKey -Force | Out-Null
+  Set-ItemProperty -Path $unKey -Name DisplayName     -Value "KidNest"
+  Set-ItemProperty -Path $unKey -Name DisplayVersion  -Value "1.1.0"
+  Set-ItemProperty -Path $unKey -Name Publisher       -Value "KidNest"
+  Set-ItemProperty -Path $unKey -Name InstallLocation -Value $Dir
+  Set-ItemProperty -Path $unKey -Name NoModify        -Value 1 -Type DWord
+  Set-ItemProperty -Path $unKey -Name NoRepair        -Value 1 -Type DWord
+  Set-ItemProperty -Path $unKey -Name UninstallString `
+    -Value "powershell.exe -ExecutionPolicy Bypass -File `"$Dir\reset-clean.ps1`""
+}
 
 Write-Host ""
 Write-Host "KidNest installed. Log: $Dir\kidproxy.log"
