@@ -8,3 +8,4 @@ proxy/urls.jsonl
 proxy/__pycache__/
 proxy/channel-ids.json
 .venv-proxy/
+setup/__pycache__/

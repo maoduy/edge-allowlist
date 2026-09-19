@@ -34,8 +34,14 @@ if _shared is None:
     _shared.start_lock = threading.Lock()
     sys.modules["__kidproxy_shared__"] = _shared
 DEFAULTS = {
-    "sitesUrl": "https://docs.google.com/spreadsheets/d/1VtlZ1FJlUmRQ3VDx7Gzlve7LZ-oHo79P9iFbNj-9VCs/export?format=csv&gid=0",
-    "channelsUrl": "https://docs.google.com/spreadsheets/d/1VtlZ1FJlUmRQ3VDx7Gzlve7LZ-oHo79P9iFbNj-9VCs/export?format=csv&gid=1729222840",
+    # Preferred: the spreadsheet id (or its full link) plus TAB NAMES. gid numbers differ in
+    # every copy of a sheet, so a shared setup cannot use them.
+    "sheetId": "",
+    "sitesTab": "websites",
+    "channelsTab": "youtube",
+    # Explicit CSV urls still win when set, for anything the pair above cannot express.
+    "sitesUrl": "",
+    "channelsUrl": "",
     "refreshSeconds": 900,
     "exemptUsers": [],
     "enforceUsers": [],      # if non-empty: ONLY these users are filtered
@@ -106,6 +112,30 @@ if _shared.lists is None:
     _shared.lists = Lists()
 L = _shared.lists
 lock = _shared.lock
+
+def sheet_id(value):
+    """Accept a full spreadsheet link or a bare id and return the id."""
+    v = (value or "").strip()
+    m = re.search(r"/spreadsheets/d/([A-Za-z0-9_-]{20,})", v)
+    if m:
+        return m.group(1)
+    return v if re.fullmatch(r"[A-Za-z0-9_-]{20,}", v) else ""
+
+
+def sheet_csv_url(sid, tab):
+    """CSV for one tab BY NAME - survives being copied, unlike an export?gid= link."""
+    return ("https://docs.google.com/spreadsheets/d/%s/gviz/tq?tqx=out:csv&sheet=%s"
+            % (sid, urllib.parse.quote(tab)))
+
+
+def source_urls():
+    sid = sheet_id(CFG.get("sheetId"))
+    sites, chans = CFG.get("sitesUrl") or "", CFG.get("channelsUrl") or ""
+    if sid:
+        sites = sites or sheet_csv_url(sid, CFG.get("sitesTab") or "websites")
+        chans = chans or sheet_csv_url(sid, CFG.get("channelsTab") or "youtube")
+    return sites, chans
+
 
 def _fetch(url):
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))  # never via ourselves
@@ -220,9 +250,14 @@ def resolve_handle(handle):
     return None
 
 def refresh():
+    sites_url, chans_url = source_urls()
+    if not sites_url:
+        L.last_err = "no sheet configured"
+        log("no sheet configured (sheetId is empty) - everything stays blocked")
+        return
     try:
-        sites, limits = _sites_with_limits(_fetch(CFG["sitesUrl"]))
-        chans = _first_col(_fetch(CFG["channelsUrl"]))
+        sites, limits = _sites_with_limits(_fetch(sites_url))
+        chans = _first_col(_fetch(chans_url)) if chans_url else []
     except Exception as e:
         L.last_err = str(e)
         log(f"list refresh failed: {e} (keeping previous list)")
@@ -386,7 +421,7 @@ def _start_url_log():
         _shared.urllog = True
     _shared.counts = Counts(os.path.join(HERE, "urllog-state.json"), log)
     threading.Thread(target=_counts_saver, daemon=True).start()
-    log("url log: on - http://kidproxy.local/log")
+    log("url log: on - http://kidnest.local/log")
 
     # Optional: also mirror it into a Google Sheet. Drop a service-account key in and
     # set sheetId to turn this on later; nothing else changes.
@@ -424,7 +459,7 @@ def _counts_saver():
 
 
 # ---------------------------------------------------------------- manual refresh
-CONTROL_HOSTS = {"kidproxy", "kidproxy.local"}
+CONTROL_HOSTS = {"kidnest", "kidnest.local", "kidproxy", "kidproxy.local"}
 CONTROL_MIN_INTERVAL = 10
 _last_manual = [0.0]
 
@@ -435,7 +470,7 @@ CONTROL_HTML = """<!doctype html><html lang="vi"><meta charset="utf-8"><title>Ki
 <h1 style="font-size:20px;margin:0 0 8px">{title}</h1>
 <p style="color:#555;margin:0 0 18px">{sub}</p>
 <pre style="background:#f7f8fa;border-radius:8px;padding:14px;font-size:13px;color:#333;margin:0 0 18px;white-space:pre-wrap">{stats}</pre>
-<a href="http://kidproxy.local/update" style="display:inline-block;background:#1a73e8;color:#fff;text-decoration:none;padding:10px 18px;border-radius:8px">Cập nhật lại</a>
+<a href="http://kidnest.local/update" style="display:inline-block;background:#1a73e8;color:#fff;text-decoration:none;padding:10px 18px;border-radius:8px">Cập nhật lại</a>
 </div></body></html>"""
 
 
@@ -488,8 +523,8 @@ LOG_HTML = """<!doctype html><html lang="vi"><meta charset="utf-8"><title>KidPro
 <h1>Nhật ký truy cập</h1>
 <p class="sub">Mỗi dòng là một trang, mỗi cột là một ngày trong tháng.</p>
 <div class="m">{months}</div>
-<div class="bar"><a href="http://kidproxy.local/log.csv?m={month}">Tải CSV tháng này</a>
-<a href="http://kidproxy.local/update">Cập nhật danh sách</a></div>
+<div class="bar"><a href="http://kidnest.local/log.csv?m={month}">Tải CSV tháng này</a>
+<a href="http://kidnest.local/update">Cập nhật danh sách</a></div>
 {tables}
 </body></html>"""
 
@@ -523,7 +558,7 @@ def log_page(query):
         have = [cur] + have
     if want not in have:
         want = have[0]
-    months = "".join('<a class="%s" href="http://kidproxy.local/log?m=%s">%s</a>'
+    months = "".join('<a class="%s" href="http://kidnest.local/log?m=%s">%s</a>'
                      % ("on" if m == want else "", m, m) for m in have)
     today = now.tm_mday if want == cur else -1
     budget = ""
@@ -1011,7 +1046,7 @@ class KidProxy:
     def http_connect(self, flow: http.HTTPFlow):
         host = flow.request.host
         if host.lower() in CONTROL_HOSTS:
-            flow.response = http.Response.make(403, b"kidproxy: dung http://kidproxy.local/update")
+            flow.response = http.Response.make(403, b"kidproxy: dung http://kidnest.local/update")
             return
         if not enforced(flow): return
         if CFG["smartDependencies"]: return          # decided per request after TLS interception

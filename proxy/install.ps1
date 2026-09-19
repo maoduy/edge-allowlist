@@ -1,12 +1,12 @@
 <#
-KidProxy installer - run in PowerShell **as Administrator** on the kid's Windows PC.
+KidNest installer - run in PowerShell **as Administrator** on the kid's Windows PC.
 
   powershell -ExecutionPolicy Bypass -File .\install.ps1
   powershell -ExecutionPolicy Bypass -File .\install.ps1 -ExemptUsers dad,mom     # extra never-filtered accounts
   powershell -ExecutionPolicy Bypass -File .\install.ps1 -EnforceUsers kid        # filter ONLY this account
 
 What it does
-  1. Installs mitmproxy (mitmdump.exe) + kidproxy.py into C:\Program Files\KidProxy (admin-only folder)
+  1. Installs mitmproxy (mitmdump.exe) + the addon into C:\Program Files\KidNest (admin-only folder)
   2. Runs it as a SYSTEM scheduled task at boot (+ a 5-minute watchdog). Standard users cannot stop it.
   3. Trusts the proxy's certificate machine-wide (needed to inspect youtube.com for the channel filter)
   4. Logs every page the filtered accounts visit, readable at http://kidproxy.local/log
@@ -21,6 +21,9 @@ param(
   [string[]]$ExemptUsers = @(),
   [string[]]$EnforceUsers = @(),
   [int]$Port = 8080,
+  [string]$SheetId = "",                         # the control sheet: full link or bare id
+  [string]$SitesTab = "websites",
+  [string]$ChannelsTab = "youtube",
   [string]$LogSheetId = "",                      # Google Sheet id to log visited URLs into
   [string]$LogCredentials = "",                  # its service-account json (default: .\kidproxy-sheets.json)
   [string]$MitmVersion = "12.2.3"
@@ -29,11 +32,32 @@ $ErrorActionPreference = "Stop"
 if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
   throw "Run this script as Administrator."
 }
-$Dir = "C:\Program Files\KidProxy"
+$Dir = "C:\Program Files\KidNest"
+# Retire a previous KidProxy install so the two do not both hold the port.
+foreach ($t in "KidProxy Watchdog", "KidProxy") {
+  if (Get-ScheduledTask -TaskName $t -ErrorAction SilentlyContinue) {
+    Stop-ScheduledTask -TaskName $t -ErrorAction SilentlyContinue
+    Unregister-ScheduledTask -TaskName $t -Confirm:$false -ErrorAction SilentlyContinue
+    Write-Host "Removed the old $t task"
+  }
+}
+$legacy = "C:\Program Files\KidProxy"
+if ((Test-Path $legacy) -and -not (Test-Path $Dir)) {
+  New-Item -ItemType Directory -Force -Path $Dir | Out-Null
+  foreach ($keep in "ca","urllog-state.json","urls.jsonl","usage-state.json","channel-ids.json") {
+    if (Test-Path "$legacy\$keep") { Copy-Item "$legacy\$keep" $Dir -Recurse -Force }   # keep history + CA
+  }
+  Write-Host "Carried the certificate and history over from KidProxy"
+}
 $Proxy = "127.0.0.1:$Port"
 New-Item -ItemType Directory -Force -Path $Dir, "$Dir\ca" | Out-Null
 
 # 1. mitmproxy binary
+$bundled = Join-Path $PSScriptRoot "mitmdump.exe"
+if ((-not (Test-Path "$Dir\mitmdump.exe")) -and (Test-Path $bundled)) {
+  Copy-Item $bundled $Dir -Force                      # shipped inside KidNest Setup.exe
+  Write-Host "Using the bundled mitmproxy"
+}
 if (-not (Test-Path "$Dir\mitmdump.exe")) {
   Write-Host "Downloading mitmproxy $MitmVersion ..."
   $zip = Join-Path $env:TEMP "mitmproxy-$MitmVersion.zip"
@@ -46,7 +70,7 @@ if (-not (Test-Path "$Dir\mitmdump.exe")) {
 }
 
 # 2. addon + config (stop a running instance first so the new code is picked up)
-Stop-ScheduledTask -TaskName "KidProxy" -ErrorAction SilentlyContinue
+Stop-ScheduledTask -TaskName "KidNest" -ErrorAction SilentlyContinue
 Stop-Process -Name mitmdump -Force -ErrorAction SilentlyContinue
 Start-Sleep -Seconds 1
 Copy-Item (Join-Path $PSScriptRoot "kidproxy.py") $Dir -Force
@@ -54,8 +78,13 @@ Copy-Item (Join-Path $PSScriptRoot "sheetlog.py") $Dir -Force
 # "kidproxy update" from any terminal, for standard users too
 $cmd = Get-Content (Join-Path $PSScriptRoot "kidproxy.cmd") -Raw
 $cmd -replace 'set PORT=8080', "set PORT=$Port" |
-  Set-Content -Path "$env:SystemRoot\System32\kidproxy.cmd" -Encoding ASCII
+  Set-Content -Path "$env:SystemRoot\System32\kidnest.cmd" -Encoding ASCII
 $cfg = @{ exemptUsers = @($ExemptUsers); enforceUsers = @($EnforceUsers); logFile = "$Dir\kidproxy.log" }
+if ($SheetId) {
+  if ($SheetId -match "/spreadsheets/d/([A-Za-z0-9_-]{20,})") { $SheetId = $Matches[1] }
+  $cfg.sheetId = $SheetId; $cfg.sitesTab = $SitesTab; $cfg.channelsTab = $ChannelsTab
+  Write-Host "Control sheet: $SheetId (tabs: $SitesTab / $ChannelsTab)"
+} else { throw "No control sheet given. Pass -SheetId <link or id>." }
 # URL logging is local by default - read it at http://kidproxy.local/log, no account needed.
 $cfg.urlLog = @{ enabled = $true; flushSeconds = 300; sheetAllRequests = $false;
                  localFile = "$Dir\urls.jsonl"; localMaxMB = 20 }
@@ -82,8 +111,8 @@ $trigger2 = New-ScheduledTaskTrigger -AtLogOn      # belt and braces if AtStartu
 $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 99 -RestartInterval (New-TimeSpan -Minutes 1) `
   -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -MultipleInstances IgnoreNew
 $principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
-Register-ScheduledTask -TaskName "KidProxy" -Action $action -Trigger $trigger,$trigger2 -Settings $settings -Principal $principal -Force | Out-Null
-$wd = New-ScheduledTaskAction -Execute "schtasks.exe" -Argument "/Run /TN KidProxy"
+Register-ScheduledTask -TaskName "KidNest" -Action $action -Trigger $trigger,$trigger2 -Settings $settings -Principal $principal -Force | Out-Null
+$wd = New-ScheduledTaskAction -Execute "schtasks.exe" -Argument "/Run /TN KidNest"
 # A -Once trigger whose start time is in the past does NOT resume after a reboot, so the
 # watchdog stopped running the moment the PC was restarted. Repeat off a daily trigger and
 # fire at startup as well.
@@ -93,8 +122,8 @@ $wdt.Repetition = (New-ScheduledTaskTrigger -Once -At (Get-Date) `
 $wdt2 = New-ScheduledTaskTrigger -AtStartup
 $wdSet = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes 1) -StartWhenAvailable `
   -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew
-Register-ScheduledTask -TaskName "KidProxy Watchdog" -Action $wd -Trigger $wdt,$wdt2 -Settings $wdSet -Principal $principal -Force | Out-Null
-Start-ScheduledTask -TaskName "KidProxy"
+Register-ScheduledTask -TaskName "KidNest Watchdog" -Action $wd -Trigger $wdt,$wdt2 -Settings $wdSet -Principal $principal -Force | Out-Null
+Start-ScheduledTask -TaskName "KidNest"
 
 # 4. trust the proxy CA machine-wide
 $cer = "$Dir\ca\mitmproxy-ca-cert.cer"
@@ -136,6 +165,6 @@ New-Item -Path $ie -Force | Out-Null
 Set-ItemProperty -Path $ie -Name Proxy -Value 1 -Type DWord
 
 Write-Host ""
-Write-Host "KidProxy installed. Log: $Dir\kidproxy.log"
+Write-Host "KidNest installed. Log: $Dir\kidproxy.log"
 Get-Content "$Dir\kidproxy.log" -Tail 3
 Write-Host "Restart the browser (or the PC). Admin accounts are not filtered; standard users are."
