@@ -166,7 +166,23 @@ if ($up) {
   } catch {
     Write-Host "  -> could not even launch mitmdump.exe: $($_.Exception.Message)" -ForegroundColor Red
   }
+  # NEVER point the machine at a proxy that is not answering. Doing so takes the
+  # internet away from every account, including the administrator's - enforceUsers
+  # decides who is filtered, not who is routed through the proxy.
+  Write-Host "Nothing was pointed at the proxy. Undoing any earlier proxy settings so" -ForegroundColor Yellow
+  Write-Host "this machine keeps working, then stopping." -ForegroundColor Yellow
+  Remove-Item "HKLM:\SOFTWARE\Policies\Microsoft\Edge" -Recurse -Force -EA SilentlyContinue
+  Remove-Item "HKLM:\SOFTWARE\Policies\Google\Chrome" -Recurse -Force -EA SilentlyContinue
+  Remove-ItemProperty "HKLM:\SOFTWARE\Policies\Microsoft\Windows\CurrentVersion\Internet Settings" `
+    -Name ProxySettingsPerUser -Force -EA SilentlyContinue
+  Remove-ItemProperty "HKLM:\SOFTWARE\Policies\Microsoft\Internet Explorer\Control Panel" `
+    -Name Proxy -Force -EA SilentlyContinue
+  Set-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Internet Settings" `
+    -Name ProxyEnable -Value 0 -Type DWord -EA SilentlyContinue
+  & netsh winhttp reset proxy | Out-Null
   Write-Host ""
+  Write-Host "Install stopped. Your internet is untouched. Send the lines above for help." -ForegroundColor Yellow
+  exit 1
 }
 
 # 5. trust the proxy CA machine-wide
