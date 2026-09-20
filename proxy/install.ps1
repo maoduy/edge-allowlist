@@ -128,13 +128,57 @@ $wdSet = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes
 Register-ScheduledTask -TaskName "KidNest Watchdog" -Action $wd -Trigger $wdt,$wdt2 -Settings $wdSet -Principal $principal -Force | Out-Null
 Start-ScheduledTask -TaskName "KidNest"
 
-# 4. trust the proxy CA machine-wide
-$cer = "$Dir\ca\mitmproxy-ca-cert.cer"
-for ($i = 0; $i -lt 60 -and -not (Test-Path $cer); $i++) { Start-Sleep -Seconds 1 }
-if (-not (Test-Path $cer)) { throw "Proxy did not start (no CA generated). See $Dir\kidproxy.log" }
-certutil -addstore -f Root $cer | Out-Null
+# 4. did it ACTUALLY start? The CA file is not proof - an upgrade carries the old one
+# over, so it exists whether or not the proxy ever ran. The log and the process are.
+$logFile = "$Dir\kidproxy.log"
+Remove-Item $logFile -Force -ErrorAction SilentlyContinue
+$up = $false
+for ($i = 0; $i -lt 30; $i++) {
+  Start-Sleep -Seconds 1
+  if ((Get-Process mitmdump -ErrorAction SilentlyContinue) -and (Test-Path $logFile)) { $up = $true; break }
+}
+if ($up) {
+  Write-Host "Proxy is running."
+} else {
+  Write-Host ""
+  Write-Host "*** KidNest did NOT start. Diagnosing... ***" -ForegroundColor Yellow
+  $info = Get-ScheduledTask -TaskName "KidNest" -EA SilentlyContinue | Get-ScheduledTaskInfo
+  if ($info) {
+    Write-Host ("  task result = 0x{0:X}   last run = {1}" -f $info.LastTaskResult, $info.LastRunTime)
+  } else { Write-Host "  the KidNest task is not registered" }
+  Write-Host "  mitmdump process: $(if (Get-Process mitmdump -EA SilentlyContinue) { 'running' } else { 'not running' })"
+  Write-Host "  log file        : $(if (Test-Path $logFile) { 'written' } else { 'never written' })"
+  Write-Host "  starting it by hand to capture the real error..."
+  $o = "$env:TEMP\kidnest-start-out.txt"; $e = "$env:TEMP\kidnest-start-err.txt"
+  try {
+    $ph = Start-Process -FilePath "$Dir\mitmdump.exe" -ArgumentList $arg -PassThru `
+            -RedirectStandardOutput $o -RedirectStandardError $e -WindowStyle Hidden -EA Stop
+    Start-Sleep -Seconds 10
+    if (-not $ph.HasExited) {
+      $ph.Kill()
+      Write-Host "  -> it RUNS when started by hand, so the scheduled task is what is failing." -ForegroundColor Yellow
+      Write-Host "     Check Task Scheduler > KidNest > History, and whether Fast Startup is on."
+    } else {
+      Write-Host "  -> mitmdump exited immediately with code $($ph.ExitCode):" -ForegroundColor Red
+      Get-Content $e, $o -EA SilentlyContinue | Where-Object { $_ } | Select-Object -First 15 |
+        ForEach-Object { Write-Host "     $_" }
+    }
+  } catch {
+    Write-Host "  -> could not even launch mitmdump.exe: $($_.Exception.Message)" -ForegroundColor Red
+  }
+  Write-Host ""
+}
 
-# 5. browser policies
+# 5. trust the proxy CA machine-wide
+$cer = "$Dir\ca\mitmproxy-ca-cert.cer"
+for ($i = 0; $i -lt 20 -and -not (Test-Path $cer); $i++) { Start-Sleep -Seconds 1 }
+if (Test-Path $cer) {
+  certutil -addstore -f Root $cer | Out-Null
+} else {
+  Write-Host "No CA generated yet - HTTPS will not work until the proxy starts." -ForegroundColor Yellow
+}
+
+# 6. browser policies
 foreach ($k in "HKLM:\SOFTWARE\Policies\Microsoft\Edge", "HKLM:\SOFTWARE\Policies\Google\Chrome") {
   New-Item -Path $k -Force | Out-Null
   Set-ItemProperty -Path $k -Name ProxyMode -Value "fixed_servers"
@@ -155,7 +199,7 @@ foreach ($k in "HKLM:\SOFTWARE\Policies\Microsoft\Edge", "HKLM:\SOFTWARE\Policie
 Set-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Edge" -Name InPrivateModeAvailability -Value 1 -Type DWord
 Set-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Google\Chrome" -Name IncognitoModeAvailability -Value 1 -Type DWord
 
-# 6. Windows-wide proxy for every app and user, and lock the proxy settings UI
+# 7. Windows-wide proxy for every app and user, and lock the proxy settings UI
 $pol = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\CurrentVersion\Internet Settings"
 New-Item -Path $pol -Force | Out-Null
 Set-ItemProperty -Path $pol -Name ProxySettingsPerUser -Value 0 -Type DWord
@@ -167,7 +211,7 @@ $ie = "HKLM:\SOFTWARE\Policies\Microsoft\Internet Explorer\Control Panel"
 New-Item -Path $ie -Force | Out-Null
 Set-ItemProperty -Path $ie -Name Proxy -Value 1 -Type DWord
 
-# 7. Add/Remove Programs entry - HKLM, so uninstalling needs an administrator
+# 8. Add/Remove Programs entry - HKLM, so uninstalling needs an administrator
 $unKey = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\KidNest"
 if (Test-Path "$Dir\reset-clean.ps1") {
   New-Item -Path $unKey -Force | Out-Null
@@ -183,5 +227,5 @@ if (Test-Path "$Dir\reset-clean.ps1") {
 
 Write-Host ""
 Write-Host "KidNest installed. Log: $Dir\kidproxy.log"
-Get-Content "$Dir\kidproxy.log" -Tail 3
+if (Test-Path "$Dir\kidproxy.log") { Get-Content "$Dir\kidproxy.log" -Tail 3 }
 Write-Host "Restart the browser (or the PC). Admin accounts are not filtered; standard users are."

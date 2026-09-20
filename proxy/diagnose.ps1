@@ -1,18 +1,19 @@
 <#
-KidProxy diagnostics - run as Administrator:
+KidNest diagnostics - run as Administrator:
     powershell -ExecutionPolicy Bypass -File .\diagnose.ps1
-Writes kidproxy-diagnose.txt to your Desktop. Send that file over.
+Writes kidnest-diagnose.txt to your Desktop. Send that file over.
 #>
-$Dir  = "C:\Program Files\KidProxy"
+$Dir  = "C:\Program Files\KidNest"
+if (-not (Test-Path $Dir)) { $Dir = "C:\Program Files\KidProxy" }   # older install
 $Port = 8080
-$out  = Join-Path ([Environment]::GetFolderPath("Desktop")) "kidproxy-diagnose.txt"
+$out  = Join-Path ([Environment]::GetFolderPath("Desktop")) "kidnest-diagnose.txt"
 $r = @()
 function S($t) { $script:r += ""; $script:r += "===== $t ====="; }
 
 S "when"; $r += (Get-Date).ToString("u"); $r += "uptime since: " + (Get-CimInstance Win32_OperatingSystem).LastBootUpTime
 
 S "scheduled tasks"
-foreach ($n in "KidProxy", "KidProxy Watchdog") {
+foreach ($n in "KidNest", "KidNest Watchdog", "KidProxy", "KidProxy Watchdog") {
   $t = Get-ScheduledTask -TaskName $n -ErrorAction SilentlyContinue
   if (-not $t) { $r += "$n : NOT REGISTERED"; continue }
   $i = $t | Get-ScheduledTaskInfo
@@ -42,6 +43,22 @@ if (Test-Path "$Dir\kidproxy.log") {
   $r += Get-Content "$Dir\kidproxy.log" -Tail 60
 } else { $r += "*** NO LOG FILE ***" }
 
+S "why it is not running"
+$r += "task registered : " + [bool](Get-ScheduledTask -TaskName KidNest -EA SilentlyContinue)
+$r += "fast startup    : " + (Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Power" -Name HiberbootEnabled -EA SilentlyContinue).HiberbootEnabled + "  (1 = on, can skip AtStartup triggers)"
+$r += "defender blocks : "
+$r += (Get-MpThreatDetection -EA SilentlyContinue | Where-Object { $_.Resources -like "*KidNest*" -or $_.Resources -like "*mitmdump*" } |
+       Select-Object -First 5 | ForEach-Object { "  $($_.InitialDetectionTime)  $($_.Resources)" })
+try {
+  $r += "manual start    : launching mitmdump.exe for 8s..."
+  $o = "$env:TEMP\kn-o.txt"; $e2 = "$env:TEMP\kn-e.txt"
+  $arg = "--listen-host 127.0.0.1 --listen-port $Port --set confdir=`"$Dir\ca`" -s `"$Dir\kidproxy.py`" -q"
+  $ph = Start-Process -FilePath "$Dir\mitmdump.exe" -ArgumentList $arg -PassThru -RedirectStandardOutput $o -RedirectStandardError $e2 -WindowStyle Hidden -EA Stop
+  Start-Sleep -Seconds 8
+  if (-not $ph.HasExited) { $ph.Kill(); $r += "  -> runs fine by hand; the scheduled task is the problem" }
+  else { $r += "  -> exited with $($ph.ExitCode):"; $r += (Get-Content $e2, $o -EA SilentlyContinue | Where-Object { $_ } | Select-Object -First 15 | ForEach-Object { "     $_" }) }
+} catch { $r += "  -> could not launch: $($_.Exception.Message)" }
+
 S "proxy policy"
 $r += "system ProxyEnable = " + (Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Internet Settings" -Name ProxyEnable -EA SilentlyContinue).ProxyEnable
 $r += "system ProxyServer = " + (Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Internet Settings" -Name ProxyServer -EA SilentlyContinue).ProxyServer
@@ -58,10 +75,10 @@ try {
   $r += "sheet fetch OK in $($sw.ElapsedMilliseconds)ms, $($resp.Content.Length) bytes"
 } catch { $r += "sheet fetch FAILED: $($_.Exception.Message)" }
 
-S "task scheduler events for KidProxy (last 20)"
+S "task scheduler events (last 20)"
 try {
   $r += Get-WinEvent -FilterHashtable @{LogName='Microsoft-Windows-TaskScheduler/Operational'} -MaxEvents 400 -EA SilentlyContinue |
-        Where-Object { $_.Message -like "*KidProxy*" } | Select-Object -First 20 |
+        Where-Object { $_.Message -like "*KidNest*" -or $_.Message -like "*KidProxy*" } | Select-Object -First 20 |
         ForEach-Object { "{0:yyyy-MM-dd HH:mm:ss} [{1}] {2}" -f $_.TimeCreated, $_.Id, ($_.Message -split "`n")[0] }
 } catch { $r += "could not read the TaskScheduler log: $($_.Exception.Message)" }
 

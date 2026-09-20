@@ -42,7 +42,7 @@ jobs:
           Copy-Item mitm\mitmdump.exe payload\ -Force
           Copy-Item proxy\install.ps1, proxy\uninstall.ps1, proxy\kidproxy.py, `
                     proxy\sheetlog.py, proxy\kidproxy.cmd payload\ -Force
-          Copy-Item setup\reset-clean.ps1 payload\ -Force
+          Copy-Item setup\reset-clean.ps1, proxy\diagnose.ps1 payload\ -Force
           Get-ChildItem payload | Format-Table Name, Length
 
       - name: Build the exe
@@ -56,6 +56,7 @@ jobs:
             --add-data "payload\sheetlog.py;." `
             --add-data "payload\kidproxy.cmd;." `
             --add-data "payload\reset-clean.ps1;." `
+            --add-data "payload\diagnose.ps1;." `
             --add-data "payload\mitmdump.exe;." `
             setup\kidnest_setup.py
 
@@ -93,6 +94,6 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release delete latest --yes --cleanup-tag 2>$null
-          gh release create latest "dist\KidNest-Setup.exe" "dist\KidNest-Setup.zip" "setup\reset-clean.ps1" `
+          gh release create latest "dist\KidNest-Setup.exe" "dist\KidNest-Setup.zip" "setup\reset-clean.ps1" "proxy\diagnose.ps1" `
             --title "KidNest Setup (latest)" `
             --notes "**KidNest-Setup.exe** - one-click installer. Download, run, paste your Google Sheet link, pick the accounts to protect.`n`n**reset-clean.ps1** - only if an older version was installed: run it as Administrator first to clear everything out. It backs up to your Desktop and writes a restore.cmd.`n`n**KidNest-Setup.zip** - the same exe inside a password-protected zip (password ``123456``), for when the browser or Defender refuses the plain .exe. Needs 7-Zip or WinRAR to extract.`n`nBuilt from $env:GITHUB_SHA."
