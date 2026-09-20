@@ -119,7 +119,8 @@ def sheet_id(value):
     m = re.search(r"/spreadsheets/d/([A-Za-z0-9_-]{20,})", v)
     if m:
         return m.group(1)
-    return v if re.fullmatch(r"[A-Za-z0-9_-]{20,}", v) else ""
+    m = re.match(r"^([A-Za-z0-9_-]{20,})(?:[/?#].*)?$", v)   # id with /edit?usp=... attached
+    return m.group(1) if m else ""
 
 
 def sheet_csv_url(sid, tab):

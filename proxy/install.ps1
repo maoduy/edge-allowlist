@@ -84,6 +84,7 @@ $cmd -replace 'set PORT=8080', "set PORT=$Port" |
 $cfg = @{ exemptUsers = @($ExemptUsers); enforceUsers = @($EnforceUsers); logFile = "$Dir\kidproxy.log" }
 if ($SheetId) {
   if ($SheetId -match "/spreadsheets/d/([A-Za-z0-9_-]{20,})") { $SheetId = $Matches[1] }
+  elseif ($SheetId -match "^([A-Za-z0-9_-]{20,})") { $SheetId = $Matches[1] }   # trailing /edit?usp=...
   $cfg.sheetId = $SheetId; $cfg.sitesTab = $SitesTab; $cfg.channelsTab = $ChannelsTab
   Write-Host "Control sheet: $SheetId (tabs: $SitesTab / $ChannelsTab)"
 } else { throw "No control sheet given. Pass -SheetId <link or id>." }

@@ -68,6 +68,18 @@ jobs:
           Write-Host "Built $exe  ($mb MB)"
           if ($mb -lt 10) { throw "exe is only $mb MB - the payload did not get bundled" }
 
+      - name: Also pack a password-protected zip
+        shell: pwsh
+        run: |
+          # Browsers and Defender block a bare unsigned .exe. They cannot inspect an
+          # encrypted archive, so this one downloads without a fight. ZipCrypto, not
+          # AES, because more tools can open it.
+          & "$env:ProgramFiles\7-Zip\7z.exe" a -tzip -p123456 `
+            "dist\KidNest-Setup.zip" "dist\KidNest-Setup.exe" | Out-Null
+          if (-not (Test-Path "dist\KidNest-Setup.zip")) { throw "zip not produced" }
+          $mb = [math]::Round((Get-Item "dist\KidNest-Setup.zip").Length / 1MB, 1)
+          Write-Host "Packed dist\KidNest-Setup.zip ($mb MB, password 123456)"
+
       - uses: actions/upload-artifact@v4
         with:
           name: KidNest-Setup
@@ -81,6 +93,6 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release delete latest --yes --cleanup-tag 2>$null
-          gh release create latest "dist\KidNest-Setup.exe" "setup\reset-clean.ps1" `
+          gh release create latest "dist\KidNest-Setup.exe" "dist\KidNest-Setup.zip" "setup\reset-clean.ps1" `
             --title "KidNest Setup (latest)" `
-            --notes "**KidNest-Setup.exe** - one-click installer. Download, run, paste your Google Sheet link, pick the accounts to protect.`n`n**reset-clean.ps1** - only if an older version was installed: run it as Administrator first to clear everything out. It backs up to your Desktop and writes a restore.cmd.`n`nBuilt from $env:GITHUB_SHA."
+            --notes "**KidNest-Setup.exe** - one-click installer. Download, run, paste your Google Sheet link, pick the accounts to protect.`n`n**reset-clean.ps1** - only if an older version was installed: run it as Administrator first to clear everything out. It backs up to your Desktop and writes a restore.cmd.`n`n**KidNest-Setup.zip** - the same exe inside a password-protected zip (password ``123456``), for when the browser or Defender refuses the plain .exe. Needs 7-Zip or WinRAR to extract.`n`nBuilt from $env:GITHUB_SHA."

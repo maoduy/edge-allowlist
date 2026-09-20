@@ -76,12 +76,50 @@ def local_accounts():
 
 # ---------------------------------------------------------------- sheet
 def sheet_id(value):
+    """Full link, or a bare id, or an id with '/edit?usp=sharing' still stuck to it."""
     import re
     v = (value or "").strip()
     m = re.search(r"/spreadsheets/d/([A-Za-z0-9_-]{20,})", v)
     if m:
         return m.group(1)
-    return v if re.fullmatch(r"[A-Za-z0-9_-]{20,}", v) else ""
+    m = re.match(r"^([A-Za-z0-9_-]{20,})(?:[/?#].*)?$", v)
+    return m.group(1) if m else ""
+
+
+def direct_opener():
+    """Never go through the system proxy. A half-removed install leaves the machine
+    pointing at 127.0.0.1:8080 with nothing listening, and every fetch dies with
+    WinError 10061 - including this app's own sheet check."""
+    return urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+
+def system_proxy():
+    """The Windows proxy currently configured, or '' - used only to explain failures."""
+    try:
+        import winreg
+        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                             r"Software\Microsoft\Windows\CurrentVersion\Internet Settings")
+        with key:
+            if not winreg.QueryValueEx(key, "ProxyEnable")[0]:
+                return ""
+            return winreg.QueryValueEx(key, "ProxyServer")[0]
+    except Exception:
+        return ""
+
+
+def fetch_csv(url):
+    """Direct first, then through whatever proxy Windows has. Direct handles the usual
+    case - a dead leftover proxy - while the fallback keeps this working on a network
+    that genuinely requires one."""
+    req = urllib.request.Request(url, headers={"User-Agent": "KidNest"})
+    first = None
+    for opener in (direct_opener(), urllib.request.build_opener()):
+        try:
+            with opener.open(req, timeout=25) as r:
+                return r.read().decode("utf-8-sig", "replace")
+        except Exception as e:
+            first = first or e
+    raise first
 
 
 def csv_url(sid, tab):
@@ -96,13 +134,15 @@ def check_sheet(sid):
     counts = {}
     for tab in ("websites", "youtube"):
         try:
-            req = urllib.request.Request(csv_url(sid, tab), headers={"User-Agent": "KidNest"})
-            with urllib.request.urlopen(req, timeout=25) as r:
-                text = r.read().decode("utf-8-sig", "replace")
+            text = fetch_csv(csv_url(sid, tab))
         except Exception as e:
-            return False, ("Không đọc được tab '%s'.\n%s\n\n"
-                           "Hãy mở Chia sẻ trên Google Sheet và đặt "
-                           "'Bất kỳ ai có đường liên kết' = Người xem." % (tab, e))
+            hint = ("Hãy mở Chia sẻ trên Google Sheet và đặt "
+                    "'Bất kỳ ai có đường liên kết' = Người xem.")
+            if "10061" in str(e) or "refused" in str(e).lower():
+                hint = ("Máy này không ra được Internet. Thường là do một bản cài cũ còn "
+                        "để lại proxy trỏ vào cổng đã chết.\n"
+                        "Hãy chạy reset-clean.ps1 (quyền quản trị), khởi động lại máy, rồi cài lại.")
+            return False, "Không đọc được tab '%s'.\n%s\n\n%s" % (tab, e, hint)
         rows = [r for r in _csv.reader(_io.StringIO(text)) if r and r[0].strip()]
         counts[tab] = max(0, len(rows) - 1)
     if not counts["websites"]:
@@ -123,6 +163,7 @@ class Setup(tk.Tk):
         self._build()
         self.after(120, self._load_accounts)
         self.after(150, self._drain)
+        self.after(300, self._warn_stale_proxy)
 
     def _build(self):
         pad = dict(padx=14, pady=(10, 0))
@@ -198,6 +239,23 @@ class Setup(tk.Tk):
         if not self.vars:
             tk.Label(self.users, fg="#a00",
                      text="Không tìm thấy tài khoản nào.").pack(anchor="w")
+
+    def _warn_stale_proxy(self):
+        """A leftover proxy with nothing behind it is why 'the internet is down'."""
+        px = system_proxy()
+        if not px:
+            return
+        import socket
+        host, _, port = px.replace("http://", "").partition(":")
+        alive = False
+        try:
+            with socket.create_connection((host or "127.0.0.1", int(port or 80)), timeout=1.5):
+                alive = True
+        except Exception:
+            alive = False
+        if not alive:
+            self.say("CẢNH BÁO: máy đang đặt proxy %s nhưng không có gì chạy ở đó." % px)
+            self.say("Đó là lý do không vào được mạng. Hãy chạy reset-clean.ps1 rồi khởi động lại.")
 
     def _check(self):
         sid = sheet_id(self.sheet.get())
