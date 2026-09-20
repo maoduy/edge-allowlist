@@ -51,7 +51,7 @@ DEFAULTS = {
     # (scripts, images, video, embedded players) are allowed automatically via Referer/Origin.
     "smartDependencies": True,
     "dependencyTtlSeconds": 3600,
-    "logFile": "",
+    "logFile": "",          # empty -> falls back to kidproxy.log beside this script
     # URL log -> Google Sheet: one tab per month "MM-yyyy", row = URL, column = day, cell = hits.
     # Blocked attempts go to "MM-yyyy chan". Only filtered (kid) accounts are logged.
     "urlLog": {
@@ -70,10 +70,11 @@ try:
         _user_cfg = json.load(f)
     _ul = dict(DEFAULTS["urlLog"]); _ul.update(_user_cfg.pop("urlLog", {}) or {})
     CFG.update(_user_cfg); CFG["urlLog"] = _ul
+    CFG["_configLoaded"] = True
 except FileNotFoundError:
-    pass
+    CFG["_configError"] = "kidproxy.json not found in " + HERE
 except Exception as e:
-    print("kidproxy: bad kidproxy.json:", e, file=sys.stderr)
+    CFG["_configError"] = "kidproxy.json is malformed: %s" % e
 
 YT_HOSTS = {"youtube.com", "www.youtube.com", "m.youtube.com", "youtubei.googleapis.com"}
 HEADERS = {"site", "sites", "website", "websites", "domain", "domains", "url", "urls", "channel", "channels", "kênh", "trang", "trang web"}
@@ -86,11 +87,17 @@ def is_ad_host(host):
     return any(host == a or host.endswith("." + a) for a in AD_HOSTS)
 SYSTEM_USERS = {"system", "local service", "network service"}
 
+def _log_path():
+    """Never rely on the config for this. If kidproxy.json is missing or malformed there
+    would be no log at all - and no way to find out why everything is being blocked."""
+    return CFG.get("logFile") or os.path.join(HERE, "kidproxy.log")
+
+
 def log(msg):
     line = time.strftime("%Y-%m-%d %H:%M:%S ") + msg
-    if CFG.get("logFile"):                    # file first: it is the only log a SYSTEM task has
+    if True:                                  # file first: it is the only log a SYSTEM task has
         try:
-            with open(CFG["logFile"], "a", encoding="utf-8") as f: f.write(line + "\n")
+            with open(_log_path(), "a", encoding="utf-8") as f: f.write(line + "\n")
         except Exception: pass
     try:
         print("kidproxy:", msg)
@@ -1038,6 +1045,9 @@ class KidProxy:
             first = not _shared.refresher
             _shared.refresher = True
         if first:                       # shared L, so one refresher serves every loaded copy
+            log("config: " + (CFG.get("_configError") or
+                              ("loaded, sheet=" + (sheet_id(CFG.get("sheetId")) or "NONE SET"))))
+            log("enforceUsers=%s exempt=%s" % (CFG.get("enforceUsers"), CFG.get("exemptUsers")))
             threading.Thread(target=_refresher, daemon=True).start()
             _shared.usage = Usage(os.path.join(HERE, "usage-state.json"), log)
             threading.Thread(target=_usage_saver, daemon=True).start()

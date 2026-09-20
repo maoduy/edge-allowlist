@@ -171,7 +171,7 @@ if ($up) {
   # NEVER point the machine at a proxy that is not answering. Doing so takes the
   # internet away from every account, including the administrator's - enforceUsers
   # decides who is filtered, not who is routed through the proxy.
-  Write-Host "Nothing was pointed at the proxy. Undoing any earlier proxy settings so" -ForegroundColor Yellow
+  Write-Host "Nothing was pointed at the proxy. Clearing anything an earlier version set," -ForegroundColor Yellow
   Write-Host "this machine keeps working, then stopping." -ForegroundColor Yellow
   Remove-Item "HKLM:\SOFTWARE\Policies\Microsoft\Edge" -Recurse -Force -EA SilentlyContinue
   Remove-Item "HKLM:\SOFTWARE\Policies\Google\Chrome" -Recurse -Force -EA SilentlyContinue
@@ -196,38 +196,83 @@ if (Test-Path $cer) {
   Write-Host "No CA generated yet - HTTPS will not work until the proxy starts." -ForegroundColor Yellow
 }
 
-# 6. browser policies
-foreach ($k in "HKLM:\SOFTWARE\Policies\Microsoft\Edge", "HKLM:\SOFTWARE\Policies\Google\Chrome") {
-  New-Item -Path $k -Force | Out-Null
-  Set-ItemProperty -Path $k -Name ProxyMode -Value "fixed_servers"
-  Set-ItemProperty -Path $k -Name ProxyServer -Value $Proxy
-  Set-ItemProperty -Path $k -Name DeveloperToolsAvailability -Value 2 -Type DWord
-  Set-ItemProperty -Path $k -Name BrowserGuestModeEnabled -Value 0 -Type DWord
-  # Edge/Chrome default to Bing, which is not on the allowlist - an address-bar search would
-  # just hit a block page. Point search, suggestions and the new tab page at Google instead.
-  Set-ItemProperty -Path $k -Name DefaultSearchProviderEnabled -Value 1 -Type DWord
-  Set-ItemProperty -Path $k -Name DefaultSearchProviderName -Value "Google"
-  Set-ItemProperty -Path $k -Name DefaultSearchProviderSearchURL -Value "https://www.google.com/search?q={searchTerms}"
-  Set-ItemProperty -Path $k -Name DefaultSearchProviderSuggestURL -Value "https://www.google.com/complete/search?output=chrome&q={searchTerms}"
-  Set-ItemProperty -Path $k -Name NewTabPageLocation -Value "https://www.google.com/"
-  New-Item -Path "$k\ExtensionInstallBlocklist" -Force | Out-Null
-  Set-ItemProperty -Path "$k\ExtensionInstallBlocklist" -Name "1" -Value "*"
-  Remove-Item -Path "$k\ExtensionInstallForcelist" -Recurse -Force -ErrorAction SilentlyContinue  # from the earlier attempt
-}
-Set-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Edge" -Name InPrivateModeAvailability -Value 1 -Type DWord
-Set-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Google\Chrome" -Name IncognitoModeAvailability -Value 1 -Type DWord
+# 6+7. Route ONLY the chosen accounts through the proxy.
+#
+# The proxy used to be set machine-wide (ProxySettingsPerUser=0 + HKLM policies). That
+# routed every account through it, administrators included - they were never filtered,
+# but they were still routed, so a proxy that failed to start took the whole machine
+# off the internet. Policies go into each chosen user's own hive instead.
+#
+# HKCU\Software\Policies is read-only for a standard user, so the kid cannot undo this,
+# while an administrator's own profile is left completely untouched.
 
-# 7. Windows-wide proxy for every app and user, and lock the proxy settings UI
-$pol = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\CurrentVersion\Internet Settings"
-New-Item -Path $pol -Force | Out-Null
-Set-ItemProperty -Path $pol -Name ProxySettingsPerUser -Value 0 -Type DWord
-$is = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Internet Settings"
-Set-ItemProperty -Path $is -Name ProxyEnable -Value 1 -Type DWord
-Set-ItemProperty -Path $is -Name ProxyServer -Value $Proxy
-Set-ItemProperty -Path $is -Name ProxyOverride -Value "<local>"
-$ie = "HKLM:\SOFTWARE\Policies\Microsoft\Internet Explorer\Control Panel"
-New-Item -Path $ie -Force | Out-Null
-Set-ItemProperty -Path $ie -Name Proxy -Value 1 -Type DWord
+function Resolve-Sid($name) {
+  try { (New-Object Security.Principal.NTAccount($name)).Translate(
+          [Security.Principal.SecurityIdentifier]).Value } catch { $null }
+}
+
+$targets = @()
+if ($EnforceUsers) {
+  $targets = @($EnforceUsers)
+} else {
+  $admins = @((Get-LocalGroupMember -Group Administrators -EA SilentlyContinue |
+               ForEach-Object { ($_.Name -split '\\')[-1] }))
+  $targets = @(Get-LocalUser | Where-Object { $_.Enabled -and $admins -notcontains $_.Name } |
+               ForEach-Object { $_.Name })
+  $targets = @($targets | Where-Object { $ExemptUsers -notcontains $_ })
+}
+if (-not $targets) { throw "No accounts to protect. Pass -EnforceUsers <name>." }
+
+New-PSDrive -PSProvider Registry -Name HKU -Root HKEY_USERS -EA SilentlyContinue | Out-Null
+
+foreach ($u in $targets) {
+  $sid = Resolve-Sid $u
+  if (-not $sid) { Write-Host "Skipping unknown account '$u'" -ForegroundColor Yellow; continue }
+  $loaded = $false
+  if (-not (Test-Path "HKU:\$sid")) {
+    $dat = "C:\Users\$u\NTUSER.DAT"
+    if (-not (Test-Path $dat)) { Write-Host "No profile for '$u' yet - log in once, then re-run." -ForegroundColor Yellow; continue }
+    & reg.exe load "HKU\$sid" $dat *> $null
+    if ($LASTEXITCODE -ne 0) { Write-Host "Could not open '$u' profile (logged in?)" -ForegroundColor Yellow; continue }
+    $loaded = $true
+  }
+  foreach ($b in "Microsoft\Edge", "Google\Chrome") {
+    $k = "HKU:\$sid\Software\Policies\$b"
+    New-Item -Path $k -Force | Out-Null
+    Set-ItemProperty -Path $k -Name ProxyMode   -Value "fixed_servers"
+    Set-ItemProperty -Path $k -Name ProxyServer -Value $Proxy
+    Set-ItemProperty -Path $k -Name DeveloperToolsAvailability -Value 2 -Type DWord
+    Set-ItemProperty -Path $k -Name BrowserGuestModeEnabled -Value 0 -Type DWord
+    # Bing is not on the allowlist, so an address-bar search would hit a block page.
+    Set-ItemProperty -Path $k -Name DefaultSearchProviderEnabled -Value 1 -Type DWord
+    Set-ItemProperty -Path $k -Name DefaultSearchProviderName -Value "Google"
+    Set-ItemProperty -Path $k -Name DefaultSearchProviderSearchURL -Value "https://www.google.com/search?q={searchTerms}"
+    Set-ItemProperty -Path $k -Name DefaultSearchProviderSuggestURL -Value "https://www.google.com/complete/search?output=chrome&q={searchTerms}"
+    Set-ItemProperty -Path $k -Name NewTabPageLocation -Value "https://www.google.com/"
+    New-Item -Path "$k\ExtensionInstallBlocklist" -Force | Out-Null
+    Set-ItemProperty -Path "$k\ExtensionInstallBlocklist" -Name "1" -Value "*"
+    Remove-Item -Path "$k\ExtensionInstallForcelist" -Recurse -Force -EA SilentlyContinue
+  }
+  Set-ItemProperty -Path "HKU:\$sid\Software\Policies\Microsoft\Edge" -Name InPrivateModeAvailability -Value 1 -Type DWord
+  Set-ItemProperty -Path "HKU:\$sid\Software\Policies\Google\Chrome"  -Name IncognitoModeAvailability -Value 1 -Type DWord
+  # WinINET proxy for that account, for apps that are not Edge or Chrome
+  $uis = "HKU:\$sid\Software\Microsoft\Windows\CurrentVersion\Internet Settings"
+  New-Item -Path $uis -Force | Out-Null
+  Set-ItemProperty -Path $uis -Name ProxyEnable   -Value 1 -Type DWord
+  Set-ItemProperty -Path $uis -Name ProxyServer   -Value $Proxy
+  Set-ItemProperty -Path $uis -Name ProxyOverride -Value "<local>"
+  if ($loaded) { [gc]::Collect(); & reg.exe unload "HKU\$sid" *> $null }
+  Write-Host "Protected account: $u"
+}
+
+# Make sure no machine-wide proxy survives from an earlier version - that is what used
+# to knock the administrator off the internet.
+Remove-ItemProperty "HKLM:\SOFTWARE\Policies\Microsoft\Windows\CurrentVersion\Internet Settings" -Name ProxySettingsPerUser -Force -EA SilentlyContinue
+Remove-ItemProperty "HKLM:\SOFTWARE\Policies\Microsoft\Internet Explorer\Control Panel" -Name Proxy -Force -EA SilentlyContinue
+Set-ItemProperty    "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Internet Settings" -Name ProxyEnable -Value 0 -Type DWord -EA SilentlyContinue
+foreach ($k in "HKLM:\SOFTWARE\Policies\Microsoft\Edge", "HKLM:\SOFTWARE\Policies\Google\Chrome") {
+  Remove-ItemProperty -Path $k -Name ProxyMode, ProxyServer -Force -EA SilentlyContinue
+}
 
 # 8. Add/Remove Programs entry - HKLM, so uninstalling needs an administrator
 $unKey = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\KidNest"
