@@ -77,6 +77,8 @@ Copy-Item (Join-Path $PSScriptRoot "kidproxy.py") $Dir -Force
 Copy-Item (Join-Path $PSScriptRoot "sheetlog.py") $Dir -Force
 $reset = Join-Path $PSScriptRoot "reset-clean.ps1"
 if (Test-Path $reset) { Copy-Item $reset $Dir -Force }        # doubles as the uninstaller
+$unlock = Join-Path $PSScriptRoot "KidNest-Unlock.bat"        # for when the proxy dies
+if (Test-Path $unlock) { Copy-Item $unlock $Dir -Force }
 # "kidproxy update" from any terminal, for standard users too
 $cmd = Get-Content (Join-Path $PSScriptRoot "kidproxy.cmd") -Raw
 $cmd -replace 'set PORT=8080', "set PORT=$Port" |
@@ -243,5 +245,6 @@ if (Test-Path "$Dir\reset-clean.ps1") {
 
 Write-Host ""
 Write-Host "KidNest installed. Log: $Dir\kidproxy.log"
+Write-Host "If the PC ever loses internet: run $Dir\KidNest-Unlock.bat as Administrator."
 if (Test-Path "$Dir\kidproxy.log") { Get-Content "$Dir\kidproxy.log" -Tail 3 }
 Write-Host "Restart the browser (or the PC). Admin accounts are not filtered; standard users are."
