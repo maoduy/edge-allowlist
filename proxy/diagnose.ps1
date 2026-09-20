@@ -43,6 +43,21 @@ if (Test-Path "$Dir\kidproxy.log") {
   $r += Get-Content "$Dir\kidproxy.log" -Tail 60
 } else { $r += "*** NO LOG FILE ***" }
 
+S "can anything actually WRITE there?"
+# The addon swallows write errors, so a blocked write looks exactly like "never started".
+$probe = Join-Path $Dir "write-test.tmp"
+try {
+  "probe" | Set-Content -Path $probe -Encoding ASCII -ErrorAction Stop
+  $r += "write to $Dir : OK"
+  Remove-Item $probe -Force -ErrorAction SilentlyContinue
+} catch {
+  $r += "write to $Dir : BLOCKED -> $($_.Exception.Message)"
+}
+$cfa = (Get-MpPreference -ErrorAction SilentlyContinue).EnableControlledFolderAccess
+$r += "controlled folder access : $cfa   (1 = on, blocks apps writing to Program Files)"
+$r += "CFA allowed apps         : " + ((Get-MpPreference -EA SilentlyContinue).ControlledFolderAccessAllowedApplications -join ", ")
+$r += "ASR rules                : " + ((Get-MpPreference -EA SilentlyContinue).AttackSurfaceReductionRules_Ids -join ", ")
+
 S "why it is not running"
 $r += "task registered : " + [bool](Get-ScheduledTask -TaskName KidNest -EA SilentlyContinue)
 $r += "fast startup    : " + (Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Power" -Name HiberbootEnabled -EA SilentlyContinue).HiberbootEnabled + "  (1 = on, can skip AtStartup triggers)"
