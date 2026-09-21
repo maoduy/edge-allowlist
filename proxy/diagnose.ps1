@@ -6,6 +6,7 @@ Writes kidnest-diagnose.txt to your Desktop. Send that file over.
 $Dir  = "C:\Program Files\KidNest"
 if (-not (Test-Path $Dir)) { $Dir = "C:\Program Files\KidProxy" }   # older install
 $Port = 8080
+$Data = "C:\ProgramData\KidNest"
 $out  = Join-Path ([Environment]::GetFolderPath("Desktop")) "kidnest-diagnose.txt"
 $r = @()
 function S($t) { $script:r += ""; $script:r += "===== $t ====="; }
@@ -28,30 +29,35 @@ $c = Test-NetConnection 127.0.0.1 -Port $Port -InformationLevel Quiet -WarningAc
 $r += "127.0.0.1:${Port} reachable: $c"
 
 S "files"
-foreach ($f in "mitmdump.exe","kidproxy.py","sheetlog.py","kidproxy.json","kidproxy.log","urllog-state.json","ca\mitmproxy-ca-cert.cer") {
+foreach ($f in "mitmdump.exe","kidproxy.py","sheetlog.py","kidproxy.json") {
   $fp = Join-Path $Dir $f
   $r += if (Test-Path $fp) { "{0,-34} {1,10} bytes  {2}" -f $f, (Get-Item $fp).Length, (Get-Item $fp).LastWriteTime } else { "$f : MISSING" }
+}
+
+foreach ($f in "kidproxy.log","urls.jsonl","urllog-state.json","usage-state.json","ca\mitmproxy-ca-cert.cer") {
+  $fp = Join-Path $Data $f
+  $r += if (Test-Path $fp) { "{0,-34} {1,10} bytes  {2}" -f "(data) $f", (Get-Item $fp).Length, (Get-Item $fp).LastWriteTime } else { "(data) $f : MISSING" }
 }
 
 S "kidproxy.json"
 if (Test-Path "$Dir\kidproxy.json") { $r += (Get-Content "$Dir\kidproxy.json" -Raw) }
 
 S "kidproxy.log (last 60 lines)"
-if (Test-Path "$Dir\kidproxy.log") {
-  $len = (Get-Item "$Dir\kidproxy.log").Length
+if (Test-Path "$Data\kidproxy.log") {
+  $len = (Get-Item "$Data\kidproxy.log").Length
   if ($len -eq 0) { $r += "*** LOG IS EMPTY - the addon never logged anything ***" }
-  $r += Get-Content "$Dir\kidproxy.log" -Tail 60
+  $r += Get-Content "$Data\kidproxy.log" -Tail 60
 } else { $r += "*** NO LOG FILE ***" }
 
 S "can anything actually WRITE there?"
 # The addon swallows write errors, so a blocked write looks exactly like "never started".
-$probe = Join-Path $Dir "write-test.tmp"
+$probe = Join-Path $Data "write-test.tmp"
 try {
   "probe" | Set-Content -Path $probe -Encoding ASCII -ErrorAction Stop
-  $r += "write to $Dir : OK"
+  $r += "write to $Data : OK"
   Remove-Item $probe -Force -ErrorAction SilentlyContinue
 } catch {
-  $r += "write to $Dir : BLOCKED -> $($_.Exception.Message)"
+  $r += "write to $Data : BLOCKED -> $($_.Exception.Message)"
 }
 $cfa = (Get-MpPreference -ErrorAction SilentlyContinue).EnableControlledFolderAccess
 $r += "controlled folder access : $cfa   (1 = on, blocks apps writing to Program Files)"
@@ -67,7 +73,7 @@ $r += (Get-MpThreatDetection -EA SilentlyContinue | Where-Object { $_.Resources 
 try {
   $r += "manual start    : launching mitmdump.exe for 8s..."
   $o = "$env:TEMP\kn-o.txt"; $e2 = "$env:TEMP\kn-e.txt"
-  $arg = "--listen-host 127.0.0.1 --listen-port $Port --set confdir=`"$Dir\ca`" -s `"$Dir\kidproxy.py`" -q"
+  $arg = "--listen-host 127.0.0.1 --listen-port $Port --set confdir=`"$Data\ca`" -s `"$Dir\kidproxy.py`" -q"
   $ph = Start-Process -FilePath "$Dir\mitmdump.exe" -ArgumentList $arg -PassThru -RedirectStandardOutput $o -RedirectStandardError $e2 -WindowStyle Hidden -EA Stop
   Start-Sleep -Seconds 8
   if (-not $ph.HasExited) { $ph.Kill(); $r += "  -> runs fine by hand; the scheduled task is the problem" }

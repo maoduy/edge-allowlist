@@ -51,7 +51,8 @@ DEFAULTS = {
     # (scripts, images, video, embedded players) are allowed automatically via Referer/Origin.
     "smartDependencies": True,
     "dependencyTtlSeconds": 3600,
-    "logFile": "",          # empty -> falls back to kidproxy.log beside this script
+    "dataDir": "",          # empty -> C:\ProgramData\KidNest
+    "logFile": "",          # empty -> kidproxy.log inside dataDir
     # URL log -> Google Sheet: one tab per month "MM-yyyy", row = URL, column = day, cell = hits.
     # Blocked attempts go to "MM-yyyy chan". Only filtered (kid) accounts are logged.
     "urlLog": {
@@ -65,6 +66,28 @@ DEFAULTS = {
     },
 }
 CFG = dict(DEFAULTS)
+
+
+def _pick_data_dir(preferred):
+    """Everything written at runtime lives here - NOT in Program Files. Controlled Folder
+    Access blocks unrecognised binaries from writing there, silently, which looks exactly
+    like the proxy never starting. Falls back to TEMP so there is always somewhere to log."""
+    for cand in (preferred,
+                 r"C:\ProgramData\KidNest" if os.name == "nt" else None,
+                 os.path.join(os.environ.get("TEMP") or "/tmp", "KidNest")):
+        if not cand:
+            continue
+        try:
+            os.makedirs(cand, exist_ok=True)
+            probe = os.path.join(cand, ".write-test")
+            with open(probe, "w") as f:
+                f.write("x")
+            os.remove(probe)
+            return cand
+        except Exception:
+            continue
+    return HERE
+
 try:
     with open(os.path.join(HERE, "kidproxy.json"), encoding="utf-8") as f:
         _user_cfg = json.load(f)
@@ -75,6 +98,8 @@ except FileNotFoundError:
     CFG["_configError"] = "kidproxy.json not found in " + HERE
 except Exception as e:
     CFG["_configError"] = "kidproxy.json is malformed: %s" % e
+
+DATA = _pick_data_dir(CFG.get("dataDir"))
 
 YT_HOSTS = {"youtube.com", "www.youtube.com", "m.youtube.com", "youtubei.googleapis.com"}
 HEADERS = {"site", "sites", "website", "websites", "domain", "domains", "url", "urls", "channel", "channels", "kênh", "trang", "trang web"}
@@ -90,7 +115,7 @@ SYSTEM_USERS = {"system", "local service", "network service"}
 def _log_path():
     """Never rely on the config for this. If kidproxy.json is missing or malformed there
     would be no log at all - and no way to find out why everything is being blocked."""
-    return CFG.get("logFile") or os.path.join(HERE, "kidproxy.log")
+    return CFG.get("logFile") or os.path.join(DATA, "kidproxy.log")
 
 
 def log(msg):
@@ -215,7 +240,7 @@ def _norm_channel(s):
     if re.match(r"^UC[\w-]{20,}$", s): return ("id", s)
     return ("handle", s.lstrip("@").lower())
 
-_ID_CACHE_FILE = os.path.join(HERE, "channel-ids.json")
+_ID_CACHE_FILE = os.path.join(DATA, "channel-ids.json")
 _id_cache = {}
 _id_fail = {}            # handle -> when resolution last failed
 _ID_FAIL_TTL = 6 * 3600
@@ -372,9 +397,7 @@ def _log_url(req):
 
 
 def _local_append(rec):
-    path = CFG["urlLog"].get("localFile")
-    if not path:
-        return
+    path = CFG["urlLog"].get("localFile") or os.path.join(DATA, "urls.jsonl")
     try:
         cap = int(CFG["urlLog"].get("localMaxMB", 20)) * 1024 * 1024
         with _local_log_lock:
@@ -427,7 +450,7 @@ def _start_url_log():
         if _shared.urllog:
             return
         _shared.urllog = True
-    _shared.counts = Counts(os.path.join(HERE, "urllog-state.json"), log)
+    _shared.counts = Counts(os.path.join(DATA, "urllog-state.json"), log)
     threading.Thread(target=_counts_saver, daemon=True).start()
     log("url log: on - http://kidnest.local/log")
 
@@ -1045,11 +1068,12 @@ class KidProxy:
             first = not _shared.refresher
             _shared.refresher = True
         if first:                       # shared L, so one refresher serves every loaded copy
+            log("data dir: " + DATA)
             log("config: " + (CFG.get("_configError") or
                               ("loaded, sheet=" + (sheet_id(CFG.get("sheetId")) or "NONE SET"))))
             log("enforceUsers=%s exempt=%s" % (CFG.get("enforceUsers"), CFG.get("exemptUsers")))
             threading.Thread(target=_refresher, daemon=True).start()
-            _shared.usage = Usage(os.path.join(HERE, "usage-state.json"), log)
+            _shared.usage = Usage(os.path.join(DATA, "usage-state.json"), log)
             threading.Thread(target=_usage_saver, daemon=True).start()
         _start_url_log()
         log(f"started; enforceUsers={CFG['enforceUsers'] or 'all non-admins'} exempt={CFG['exemptUsers']}")

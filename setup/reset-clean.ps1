@@ -186,6 +186,7 @@ foreach ($store in "Cert:\LocalMachine\Root", "Cert:\CurrentUser\Root") {
 # ---------------------------------------------------------------- 5. files
 $killPaths = @(
   "C:\Program Files\KidNest",
+  "C:\ProgramData\KidNest",
   "C:\Program Files\KidProxy",
   "C:\Kids",
   "C:\EdgeExt",

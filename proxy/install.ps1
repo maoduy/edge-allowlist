@@ -32,7 +32,15 @@ $ErrorActionPreference = "Stop"
 if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
   throw "Run this script as Administrator."
 }
-$Dir = "C:\Program Files\KidNest"
+$Dir  = "C:\Program Files\KidNest"
+# Runtime files go to ProgramData, never Program Files. Controlled Folder Access blocks
+# unrecognised binaries from writing into Program Files without saying so, which makes a
+# working proxy look like one that never started.
+$Data = "C:\ProgramData\KidNest"
+New-Item -ItemType Directory -Force -Path $Data | Out-Null
+# admins and SYSTEM may write; the filtered accounts may read their own log, nothing more
+& icacls $Data /inheritance:r /grant "*S-1-5-18:(OI)(CI)F" /grant "*S-1-5-32-544:(OI)(CI)F" `
+         /grant "*S-1-5-32-545:(OI)(CI)RX" *> $null
 # Retire a previous KidProxy install so the two do not both hold the port.
 foreach ($t in "KidProxy Watchdog", "KidProxy") {
   if (Get-ScheduledTask -TaskName $t -ErrorAction SilentlyContinue) {
@@ -49,8 +57,17 @@ if ((Test-Path $legacy) -and -not (Test-Path $Dir)) {
   }
   Write-Host "Carried the certificate and history over from KidProxy"
 }
+foreach ($old in $legacy, $Dir) {                 # state used to sit next to the program
+  foreach ($f in "ca", "kidproxy.log", "urls.jsonl", "urllog-state.json",
+                 "usage-state.json", "channel-ids.json") {
+    if ((Test-Path "$old\$f") -and -not (Test-Path "$Data\$f")) {
+      Move-Item "$old\$f" "$Data\$f" -Force -ErrorAction SilentlyContinue
+      Write-Host "Moved $f to $Data"
+    }
+  }
+}
 $Proxy = "127.0.0.1:$Port"
-New-Item -ItemType Directory -Force -Path $Dir, "$Dir\ca" | Out-Null
+New-Item -ItemType Directory -Force -Path $Dir, "$Data\ca" | Out-Null
 
 # 1. mitmproxy binary
 $bundled = Join-Path $PSScriptRoot "mitmdump.exe"
@@ -83,7 +100,8 @@ if (Test-Path $unlock) { Copy-Item $unlock $Dir -Force }
 $cmd = Get-Content (Join-Path $PSScriptRoot "kidproxy.cmd") -Raw
 $cmd -replace 'set PORT=8080', "set PORT=$Port" |
   Set-Content -Path "$env:SystemRoot\System32\kidnest.cmd" -Encoding ASCII
-$cfg = @{ exemptUsers = @($ExemptUsers); enforceUsers = @($EnforceUsers); logFile = "$Dir\kidproxy.log" }
+$cfg = @{ exemptUsers = @($ExemptUsers); enforceUsers = @($EnforceUsers)
+          dataDir = $Data; logFile = "$Data\kidproxy.log" }
 if ($SheetId) {
   if ($SheetId -match "/spreadsheets/d/([A-Za-z0-9_-]{20,})") { $SheetId = $Matches[1] }
   elseif ($SheetId -match "^([A-Za-z0-9_-]{20,})") { $SheetId = $Matches[1] }   # trailing /edit?usp=...
@@ -92,7 +110,7 @@ if ($SheetId) {
 } else { throw "No control sheet given. Pass -SheetId <link or id>." }
 # URL logging is local by default - read it at http://kidproxy.local/log, no account needed.
 $cfg.urlLog = @{ enabled = $true; flushSeconds = 300; sheetAllRequests = $false;
-                 localFile = "$Dir\urls.jsonl"; localMaxMB = 20 }
+                 localFile = "$Data\urls.jsonl"; localMaxMB = 20 }
 if ($LogSheetId) {
   # Optional mirror into Google Sheets, for reading the log away from this PC.
   if (-not $LogCredentials) { $LogCredentials = Join-Path $PSScriptRoot "kidproxy-sheets.json" }
@@ -108,7 +126,7 @@ $cfg | ConvertTo-Json -Depth 5 | Set-Content -Path "$Dir\kidproxy.json" -Encodin
 
 # 3. scheduled tasks (SYSTEM, at boot, no time limit, restart on failure) + watchdog
 $exe = "$Dir\mitmdump.exe"
-$arg = "--listen-host 127.0.0.1 --listen-port $Port --set confdir=`"$Dir\ca`" -s `"$Dir\kidproxy.py`" -q"
+$arg = "--listen-host 127.0.0.1 --listen-port $Port --set confdir=`"$Data\ca`" -s `"$Dir\kidproxy.py`" -q"
 $action = New-ScheduledTaskAction -Execute $exe -Argument $arg
 $trigger = New-ScheduledTaskTrigger -AtStartup
 try { $trigger.Delay = "PT15S" } catch {}          # let the network come up first
@@ -132,7 +150,7 @@ Start-ScheduledTask -TaskName "KidNest"
 
 # 4. did it ACTUALLY start? The CA file is not proof - an upgrade carries the old one
 # over, so it exists whether or not the proxy ever ran. The log and the process are.
-$logFile = "$Dir\kidproxy.log"
+$logFile = "$Data\kidproxy.log"
 Remove-Item $logFile -Force -ErrorAction SilentlyContinue
 $up = $false
 for ($i = 0; $i -lt 30; $i++) {
@@ -188,7 +206,7 @@ if ($up) {
 }
 
 # 5. trust the proxy CA machine-wide
-$cer = "$Dir\ca\mitmproxy-ca-cert.cer"
+$cer = "$Data\ca\mitmproxy-ca-cert.cer"
 for ($i = 0; $i -lt 20 -and -not (Test-Path $cer); $i++) { Start-Sleep -Seconds 1 }
 if (Test-Path $cer) {
   certutil -addstore -f Root $cer | Out-Null
@@ -289,7 +307,7 @@ if (Test-Path "$Dir\reset-clean.ps1") {
 }
 
 Write-Host ""
-Write-Host "KidNest installed. Log: $Dir\kidproxy.log"
+Write-Host "KidNest installed. Log: $Data\kidproxy.log"
 Write-Host "If the PC ever loses internet: run $Dir\KidNest-Unlock.bat as Administrator."
-if (Test-Path "$Dir\kidproxy.log") { Get-Content "$Dir\kidproxy.log" -Tail 3 }
+if (Test-Path "$logFile") { Get-Content $logFile -Tail 3 }
 Write-Host "Restart the browser (or the PC). Admin accounts are not filtered; standard users are."
