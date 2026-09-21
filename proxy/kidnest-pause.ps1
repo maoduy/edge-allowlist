@@ -41,6 +41,41 @@ if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
   exit
 }
 
+function Set-ProfileProxy($on) {
+    # Routing lives in each enforced account's own hive now, so clearing HKLM is not
+    # enough - the kid's proxy would survive and that account would stay offline.
+    New-PSDrive -PSProvider Registry -Name HKU -Root HKEY_USERS -EA SilentlyContinue | Out-Null
+    $profiles = Get-ChildItem "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList" -EA SilentlyContinue |
+                Where-Object { $_.PSChildName -match '^S-1-5-21-' }
+    foreach ($pr in $profiles) {
+        $sid  = $pr.PSChildName
+        $path = (Get-ItemProperty $pr.PSPath -Name ProfileImagePath -EA SilentlyContinue).ProfileImagePath
+        $loaded = $false
+        if (-not (Test-Path "HKU:\$sid")) {
+            $dat = Join-Path $path "NTUSER.DAT"
+            if (-not (Test-Path $dat)) { continue }
+            & reg.exe load "HKU\$sid" $dat *> $null
+            if ($LASTEXITCODE -ne 0) { continue }
+            $loaded = $true
+        }
+        foreach ($b in "Microsoft\Edge", "Google\Chrome") {
+            $k = "HKU:\$sid\Software\Policies\$b"
+            if (-not (Test-Path $k)) { continue }
+            if ($on) {
+                Set-ItemProperty -Path $k -Name ProxyMode   -Value "fixed_servers"
+                Set-ItemProperty -Path $k -Name ProxyServer -Value "127.0.0.1:$Port"
+            } else {
+                Remove-ItemProperty -Path $k -Name ProxyMode, ProxyServer -Force -EA SilentlyContinue
+            }
+        }
+        $uis = "HKU:\$sid\Software\Microsoft\Windows\CurrentVersion\Internet Settings"
+        if (Test-Path $uis) {
+            Set-ItemProperty -Path $uis -Name ProxyEnable -Value $(if ($on) { 1 } else { 0 }) -Type DWord -EA SilentlyContinue
+        }
+        if ($loaded) { [gc]::Collect(); & reg.exe unload "HKU\$sid" *> $null }
+    }
+}
+
 function Get-State {
   $t = Get-ScheduledTask -TaskName "KidNest" -ErrorAction SilentlyContinue
   if (-not $t) { return "not-installed" }
@@ -80,6 +115,7 @@ if ($Resume) {
   Set-ItemProperty -Path $IS     -Name ProxyServer -Value "127.0.0.1:$Port"
   Set-ItemProperty -Path $IEPOL  -Name Proxy -Value 1 -Type DWord
 
+  Set-ProfileProxy $true
   Enable-ScheduledTask -TaskName "KidNest" | Out-Null
   Enable-ScheduledTask -TaskName "KidNest Watchdog" | Out-Null
   Start-ScheduledTask  -TaskName "KidNest"
@@ -115,7 +151,9 @@ Disable-ScheduledTask -TaskName "KidNest" | Out-Null
 Stop-ScheduledTask    -TaskName "KidNest"
 Stop-Process -Name mitmdump -Force
 
-# the proxy is gone, so the machine must stop being pointed at it
+# the proxy is gone, so nothing must still be pointed at it - including each
+# enforced account's own hive, which is where routing actually lives
+Set-ProfileProxy $false
 Set-ItemProperty    -Path $IS -Name ProxyEnable -Value 0 -Type DWord
 Remove-ItemProperty -Path $EDGE   -Name ProxyMode, ProxyServer
 Remove-ItemProperty -Path $CHROME -Name ProxyMode, ProxyServer

@@ -19,6 +19,19 @@ echo   KidNest - khoi phuc ket noi mang
 echo ================================================
 echo.
 
+REM If KidNest is installed, its own script clears every account's hive - the
+REM reg lines below only reach HKLM and whoever is running this file.
+if exist "%ProgramFiles%\KidNest\kidnest-pause.ps1" (
+  echo   Dung KidNest va tra lai mang cho moi tai khoan...
+  powershell -NoProfile -ExecutionPolicy Bypass -File "%ProgramFiles%\KidNest\kidnest-pause.ps1"
+  echo.
+  echo   Xong. Dong han trinh duyet roi mo lai.
+  echo   Bat lai sau bang:  kidnest resume
+  echo.
+  pause
+  exit /b
+)
+
 schtasks /end    /tn "KidNest"                >nul 2>&1
 schtasks /delete /tn "KidNest"            /f  >nul 2>&1
 schtasks /delete /tn "KidNest Watchdog"   /f  >nul 2>&1

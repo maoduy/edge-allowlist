@@ -42,7 +42,7 @@ jobs:
           Copy-Item mitm\mitmdump.exe payload\ -Force
           Copy-Item proxy\install.ps1, proxy\uninstall.ps1, proxy\kidproxy.py, `
                     proxy\sheetlog.py, proxy\kidproxy.cmd payload\ -Force
-          Copy-Item setup\reset-clean.ps1, proxy\diagnose.ps1, setup\KidNest-Unlock.bat payload\ -Force
+          Copy-Item setup\reset-clean.ps1, proxy\diagnose.ps1, setup\KidNest-Unlock.bat, proxy\kidnest-pause.ps1 payload\ -Force
           Get-ChildItem payload | Format-Table Name, Length
 
       - name: Build the exe
@@ -58,6 +58,7 @@ jobs:
             --add-data "payload\reset-clean.ps1;." `
             --add-data "payload\diagnose.ps1;." `
             --add-data "payload\KidNest-Unlock.bat;." `
+            --add-data "payload\kidnest-pause.ps1;." `
             --add-data "payload\mitmdump.exe;." `
             setup\kidnest_setup.py
 

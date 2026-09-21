@@ -96,6 +96,22 @@ $reset = Join-Path $PSScriptRoot "reset-clean.ps1"
 if (Test-Path $reset) { Copy-Item $reset $Dir -Force }        # doubles as the uninstaller
 $unlock = Join-Path $PSScriptRoot "KidNest-Unlock.bat"        # for when the proxy dies
 if (Test-Path $unlock) { Copy-Item $unlock $Dir -Force }
+foreach ($extra in "kidnest-pause.ps1", "diagnose.ps1") {
+  $src = Join-Path $PSScriptRoot $extra
+  if (Test-Path $src) { Copy-Item $src $Dir -Force }
+}
+# A one-click way back, on the desktop of whoever installed this - an administrator.
+# Not the Public desktop: the kid has no use for it and no need to see it.
+if (Test-Path "$Dir\KidNest-Unlock.bat") {
+  try {
+    $lnk = Join-Path ([Environment]::GetFolderPath("Desktop")) "KidNest - Khoi phuc mang.lnk"
+    $sc = (New-Object -ComObject WScript.Shell).CreateShortcut($lnk)
+    $sc.TargetPath = "$Dir\KidNest-Unlock.bat"
+    $sc.WorkingDirectory = $Dir
+    $sc.Description = "Tra lai ket noi mang neu KidNest gap su co"
+    $sc.Save()
+  } catch { Write-Host "(could not create the desktop shortcut: $($_.Exception.Message))" }
+}
 # "kidproxy update" from any terminal, for standard users too
 $cmd = Get-Content (Join-Path $PSScriptRoot "kidproxy.cmd") -Raw
 $cmd -replace 'set PORT=8080', "set PORT=$Port" |
@@ -308,6 +324,7 @@ if (Test-Path "$Dir\reset-clean.ps1") {
 
 Write-Host ""
 Write-Host "KidNest installed. Log: $Data\kidproxy.log"
-Write-Host "If the PC ever loses internet: run $Dir\KidNest-Unlock.bat as Administrator."
+Write-Host "If the PC ever loses internet: use the desktop shortcut"
+Write-Host "  \"KidNest - Khoi phuc mang\", or run: kidnest unlock"
 if (Test-Path "$logFile") { Get-Content $logFile -Tail 3 }
 Write-Host "Restart the browser (or the PC). Admin accounts are not filtered; standard users are."
