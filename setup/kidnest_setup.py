@@ -17,6 +17,9 @@ import urllib.request
 from tkinter import messagebox, ttk
 
 APP = "KidNest"
+# The sheet this build ships with. Pre-filled in the window and still editable there,
+# so sharing a copy with someone who keeps their own lists needs no rebuild.
+DEFAULT_SHEET = "1VtlZ1FJlUmRQ3VDx7Gzlve7LZ-oHo79P9iFbNj-9VCs"
 INSTALL_DIR = os.path.join(os.environ.get("ProgramFiles", r"C:\Program Files"), "KidNest")
 PAYLOAD = ("install.ps1", "uninstall.ps1", "kidproxy.py", "sheetlog.py",
            "kidproxy.cmd", "mitmdump.exe", "reset-clean.ps1")
@@ -204,6 +207,7 @@ class Setup(tk.Tk):
         self.after(120, self._load_accounts)
         self.after(150, self._drain)
         self.after(300, self._warn_stale_proxy)
+        self.after(400, lambda: threading.Thread(target=self._check_async, daemon=True).start())
 
     def _build(self):
         pad = dict(padx=14, pady=(10, 0))
@@ -218,9 +222,10 @@ class Setup(tk.Tk):
         box.grid(row=2, column=0, sticky="ew", **pad)
         self.sheet = tk.Entry(box, width=62)
         self.sheet.grid(row=0, column=0, padx=10, pady=10)
-        self.sheet.insert(0, "")
+        self.sheet.insert(0, DEFAULT_SHEET)
+        self.sheet.selection_range(0, "end")      # typing replaces it outright
         ttk.Button(box, text="Kiểm tra", command=self._check).grid(row=0, column=1, padx=(0, 10))
-        self.sheet_msg = tk.Label(box, text="Dán đường liên kết Google Sheet vào đây.",
+        self.sheet_msg = tk.Label(box, text="Đang kiểm tra sheet mặc định...",
                                   fg="#666", anchor="w", justify="left", wraplength=470)
         self.sheet_msg.grid(row=1, column=0, columnspan=2, sticky="w", padx=10, pady=(0, 10))
 
@@ -300,6 +305,16 @@ class Setup(tk.Tk):
         if not alive:
             self.say("CẢNH BÁO: máy đang đặt proxy %s nhưng không có gì chạy ở đó." % px)
             self.say("Đó là lý do không vào được mạng. Hãy chạy reset-clean.ps1 rồi khởi động lại.")
+
+    def _check_async(self):
+        """The default sheet is verified as the window opens, so a working setup needs
+        one click and a broken one says so before anything is installed."""
+        sid = sheet_id(self.sheet.get())
+        if not sid:
+            return
+        ok, msg = check_sheet(sid)
+        self.after(0, lambda: self.sheet_msg.configure(
+            text=msg, fg="#176b3a" if ok else "#a00"))
 
     def _check(self):
         sid = sheet_id(self.sheet.get())

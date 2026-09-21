@@ -21,7 +21,9 @@ param(
   [string[]]$ExemptUsers = @(),
   [string[]]$EnforceUsers = @(),
   [int]$Port = 8080,
-  [string]$SheetId = "",                         # the control sheet: full link or bare id
+  # Default control sheet for this build; the setup window pre-fills the same one and
+  # lets it be replaced. Keep in step with DEFAULT_SHEET in setup/kidnest_setup.py.
+  [string]$SheetId = "1VtlZ1FJlUmRQ3VDx7Gzlve7LZ-oHo79P9iFbNj-9VCs",
   [string]$SitesTab = "websites",
   [string]$ChannelsTab = "youtube",
   [string]$LogSheetId = "",                      # Google Sheet id to log visited URLs into
