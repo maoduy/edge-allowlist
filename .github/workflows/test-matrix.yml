@@ -1,0 +1,164 @@
+name: Test matrix
+
+# Four scenarios: two Windows generations x two enforcement modes.
+#
+# GitHub offers no Windows 10/11 CLIENT images, only Server. windows-2019 shares the
+# Windows 10 codebase, windows-2022 and windows-2025 the Windows 11 one. Same kernel,
+# same APIs KidNest touches - but not a client SKU, so client-only behaviour (S mode,
+# Family Safety, an OEM's antivirus) is still not covered here.
+#
+# The "all users" mode filters a PURPOSE-MADE administrator account, never the runner's
+# own: routing the runner through the proxy would cut off the job itself.
+
+on:
+  workflow_dispatch:
+    inputs:
+      sheet:
+        description: 'Control sheet id or link'
+        required: true
+        default: '1VtlZ1FJlUmRQ3VDx7Gzlve7LZ-oHo79P9iFbNj-9VCs'
+
+env:
+  MITM_VERSION: '12.2.3'
+  KIDUSER: 'kidtest'
+  ADMUSER: 'admintest'
+  TESTPASS: 'K1dN3st-Test!2026'
+  LISTED: 'https://www.google.com/'
+  UNLISTED: 'https://example.com/'
+
+jobs:
+  scenario:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2019, windows-2022, windows-2025]
+        mode: [standard-only, all-users]
+    name: ${{ matrix.os }} / ${{ matrix.mode }}
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Stage payload
+        shell: pwsh
+        run: |
+          $url = "https://downloads.mitmproxy.org/$env:MITM_VERSION/mitmproxy-$env:MITM_VERSION-windows-x86_64.zip"
+          Invoke-WebRequest -Uri $url -OutFile mitm.zip -UseBasicParsing
+          Expand-Archive mitm.zip -DestinationPath mitm -Force
+          New-Item -ItemType Directory -Force -Path payload | Out-Null
+          Copy-Item mitm\mitmdump.exe payload\ -Force
+          Copy-Item proxy\install.ps1, proxy\uninstall.ps1, proxy\kidproxy.py, proxy\sheetlog.py, `
+                    proxy\kidproxy.cmd, proxy\diagnose.ps1, setup\reset-clean.ps1, `
+                    setup\KidNest-Unlock.bat payload\ -Force
+
+      - name: Create the two test accounts
+        shell: pwsh
+        run: |
+          $sec = ConvertTo-SecureString $env:TESTPASS -AsPlainText -Force
+          foreach ($u in $env:KIDUSER, $env:ADMUSER) {
+            New-LocalUser -Name $u -Password $sec -AccountNeverExpires -PasswordNeverExpires | Out-Null
+            Add-LocalGroupMember -Group "Users" -Member $u -EA SilentlyContinue
+            $c = New-Object PSCredential($u, $sec)
+            Start-Process cmd.exe -Credential $c -ArgumentList "/c","echo ." -LoadUserProfile -Wait -NoNewWindow
+          }
+          Add-LocalGroupMember -Group "Administrators" -Member $env:ADMUSER
+          Write-Host "kid   : $env:KIDUSER (standard)"
+          Write-Host "admin : $env:ADMUSER (Administrators)  - NOT the runner's own account"
+
+      - name: Install
+        shell: pwsh
+        run: |
+          $enforce = if ("${{ matrix.mode }}" -eq "all-users") { "$env:KIDUSER,$env:ADMUSER" } else { $env:KIDUSER }
+          Write-Host "-EnforceUsers $enforce"
+          .\payload\install.ps1 -SheetId "${{ inputs.sheet }}" -EnforceUsers $enforce.Split(",")
+
+      - name: Probe as each account
+        id: probe
+        shell: pwsh
+        run: |
+          $lines = @(
+            '@echo off',
+            "curl.exe -s -o NUL -w ""LISTED=%%{http_code} "" --max-time 25 -x http://127.0.0.1:8080 -k $env:LISTED",
+            "curl.exe -s -o NUL -w ""UNLISTED=%%{http_code}"" --max-time 25 -x http://127.0.0.1:8080 -k $env:UNLISTED"
+          )
+          Set-Content C:\probe.cmd $lines -Encoding ASCII
+          icacls C:\Users\Public /grant "Everyone:(OI)(CI)M" *>$null
+          icacls C:\probe.cmd /grant "Everyone:(RX)" *>$null
+          $sec = ConvertTo-SecureString $env:TESTPASS -AsPlainText -Force
+          foreach ($u in $env:KIDUSER, $env:ADMUSER) {
+            $out = "C:\Users\Public\$u.txt"
+            Remove-Item $out -Force -EA SilentlyContinue
+            Set-Content "C:\run-$u.cmd" @("@echo off", "call C:\probe.cmd > $out 2>&1") -Encoding ASCII
+            icacls "C:\run-$u.cmd" /grant "Everyone:(RX)" *>$null
+            $c = New-Object PSCredential($u, $sec)
+            try { Start-Process cmd.exe -Credential $c -ArgumentList "/c","C:\run-$u.cmd" -LoadUserProfile -Wait -EA Stop }
+            catch { Write-Host "could not run as ${u}: $($_.Exception.Message)" }
+          }
+          Start-Sleep -Seconds 3
+          foreach ($u in $env:KIDUSER, $env:ADMUSER) {
+            $f = "C:\Users\Public\$u.txt"
+            $t = if (Test-Path $f) { (Get-Content $f -Raw).Trim() } else { "NO OUTPUT" }
+            Write-Host "$u -> $t"
+            "$u=$t" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
+          }
+
+      - name: Judge the scenario
+        shell: pwsh
+        run: |
+          function Code($who, $which) {
+            $f = "C:\Users\Public\$who.txt"
+            if (-not (Test-Path $f)) { return "none" }
+            $t = Get-Content $f -Raw
+            if ($t -match "$which=(\d+)") { return $Matches[1] }
+            return "none"
+          }
+          $kidUn = Code $env:KIDUSER "UNLISTED"
+          $kidLi = Code $env:KIDUSER "LISTED"
+          $admUn = Code $env:ADMUSER "UNLISTED"
+          $admLi = Code $env:ADMUSER "LISTED"
+          $mode = "${{ matrix.mode }}"
+          Write-Host "kid   listed=$kidLi unlisted=$kidUn"
+          Write-Host "admin listed=$admLi unlisted=$admUn"
+
+          $fail = @()
+          # the filtered accounts must reach a listed site and be refused an unlisted one
+          if ($kidUn -ne "403") { $fail += "kid was NOT blocked on an unlisted site (got $kidUn)" }
+          if ($kidLi -eq "403") { $fail += "kid was blocked on a LISTED site (got $kidLi)" }
+          if ($mode -eq "all-users") {
+            if ($admUn -ne "403") { $fail += "admin was NOT blocked though enforced (got $admUn)" }
+            if ($admLi -eq "403") { $fail += "admin was blocked on a LISTED site (got $admLi)" }
+          } else {
+            if ($admUn -eq "403") { $fail += "admin WAS blocked though not enforced (got $admUn)" }
+          }
+
+          $log = "C:\ProgramData\KidNest\kidproxy.log"
+          if (-not (Test-Path $log)) { $fail += "no log written" }
+          else {
+            $l = Get-Content $log -Raw
+            if ($l -notmatch "lists loaded") { $fail += "the sheet never loaded" }
+            if ($l -match "\(None\)")        { $fail += "user lookup returned None" }
+          }
+
+          $status = if ($fail) { "FAIL" } else { "PASS" }
+          $row = "| ${{ matrix.os }} | $mode | kid $kidLi/$kidUn | admin $admLi/$admUn | $status |"
+          $row | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+          if ($fail) { $fail | ForEach-Object { Write-Host "FAIL: $_" }; exit 1 }
+          Write-Host "PASS"
+
+      - name: Log
+        if: always()
+        shell: pwsh
+        run: |
+          $log = "C:\ProgramData\KidNest\kidproxy.log"
+          if (Test-Path $log) { Get-Content $log } else { Write-Host "*** NO LOG ***" }
+
+      - name: Uninstall and verify clean
+        if: always()
+        shell: pwsh
+        run: |
+          .\payload\reset-clean.ps1
+          $left = @()
+          if (Get-ScheduledTask -TaskName KidNest -EA SilentlyContinue) { $left += "task" }
+          if (Test-Path 'C:\Program Files\KidNest') { $left += "program dir" }
+          if (Test-Path 'C:\ProgramData\KidNest')   { $left += "data dir" }
+          if ($left) { Write-Host "LEFT BEHIND: $($left -join ', ')"; exit 1 }
+          Write-Host "machine clean"
