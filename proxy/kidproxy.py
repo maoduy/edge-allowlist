@@ -846,7 +846,7 @@ def _pid_for_port_windows(port):
     class ROW(ctypes.Structure):
         _fields_ = [("state", wintypes.DWORD), ("laddr", wintypes.DWORD), ("lport", wintypes.DWORD),
                     ("raddr", wintypes.DWORD), ("rport", wintypes.DWORD), ("pid", wintypes.DWORD)]
-    iphlp = ctypes.windll.iphlpapi
+    iphlp = ctypes.WinDLL("iphlpapi", use_last_error=True)
     iphlp.GetExtendedTcpTable.argtypes = [ctypes.c_void_p, ctypes.POINTER(wintypes.DWORD),
                                           wintypes.BOOL, wintypes.ULONG,
                                           ctypes.c_int, wintypes.ULONG]
@@ -865,11 +865,14 @@ def _pid_for_port_windows(port):
 def _user_for_pid_windows(pid):
     import ctypes
     from ctypes import wintypes
-    adv, k32 = ctypes.windll.advapi32, ctypes.windll.kernel32
-    # Without these, ctypes assumes every function returns a C int. On 64-bit Windows a
-    # HANDLE is 64 bits, so the handle came back TRUNCATED and every call that used it
-    # failed - the lookup returned None, every connection looked like an unknown user,
-    # and the addon fails closed, which blocked everybody including administrators.
+    # Private WinDLL instances, not ctypes.windll: that one is shared process-wide, so
+    # setting argtypes on it would also rewrite the signatures mitmproxy itself uses.
+    adv = ctypes.WinDLL("advapi32", use_last_error=True)
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    # Undeclared functions are assumed to take and return C ints. On 64-bit Windows a
+    # HANDLE and a PSID are 64 bits, so handles came back truncated and passing a SID
+    # raised "int too long to convert" - the lookup returned None, every connection
+    # looked like an unknown user, and the addon failed closed on all of them.
     k32.OpenProcess.restype = wintypes.HANDLE
     k32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
     k32.CloseHandle.argtypes = [wintypes.HANDLE]
@@ -878,6 +881,11 @@ def _user_for_pid_windows(pid):
     adv.GetTokenInformation.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p,
                                         wintypes.DWORD, ctypes.POINTER(wintypes.DWORD)]
     adv.GetTokenInformation.restype = wintypes.BOOL
+    adv.LookupAccountSidW.argtypes = [wintypes.LPCWSTR, ctypes.c_void_p,
+                                      wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD),
+                                      wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD),
+                                      ctypes.POINTER(wintypes.DWORD)]
+    adv.LookupAccountSidW.restype = wintypes.BOOL
     h = k32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
     if not h:
         log(f"user lookup: OpenProcess({pid}) failed, err={ctypes.get_last_error()}")
