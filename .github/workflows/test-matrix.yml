@@ -208,6 +208,14 @@ jobs:
           $c = New-Object PSCredential($env:KIDUSER, $sec)
           Start-Process cmd.exe -Credential $c -ArgumentList "/c","echo ." -LoadUserProfile -Wait -NoNewWindow
 
+      - name: Do the account names come out right?
+        shell: pwsh
+        run: |
+          # The setup window must show the person's real name, not the account id
+          # Windows derives from a Microsoft account ("nguye").
+          Set-LocalUser -Name $env:KIDUSER -FullName "Nguyễn Duy Phước An"
+          python -c "import sys; sys.path.insert(0,'setup'); import kidnest_setup as k; print(k.local_accounts())"
+
       - name: Hold port 8080 so the proxy cannot start
         shell: pwsh
         run: |

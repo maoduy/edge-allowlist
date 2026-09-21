@@ -53,24 +53,58 @@ def relaunch_as_admin():
 
 
 def powershell(args, cwd=None):
-    return subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass"] + args,
-                          capture_output=True, text=True, cwd=cwd,
-                          creationflags=NOWINDOW, timeout=120)
+    """Bytes, decoded as UTF-8 by us. The console default on a Vietnamese Windows mangles
+    names like "Nguyen Duy Phuoc An" into nonsense."""
+    r = subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass"] + args,
+                       capture_output=True, cwd=cwd, creationflags=NOWINDOW, timeout=120)
+    return (r.stdout or b"").decode("utf-8", "replace")
+
+
+# The account name is what Windows uses internally and what -EnforceUsers needs. For a
+# Microsoft account it is just the first few letters of the email ("nguye"), which is not
+# what anyone recognises - the person's real name lives in the identity cache.
+_PS_ACCOUNTS = r"""
+[Console]::OutputEncoding = [Text.Encoding]::UTF8
+$admins = @()
+try { $admins = @(Get-LocalGroupMember -Group Administrators -EA Stop |
+                  ForEach-Object { ($_.Name -split '\\')[-1] }) } catch { }
+Get-LocalUser | ForEach-Object {
+  $sid = $_.SID.Value
+  $display = $null
+  $ic = "HKLM:\SOFTWARE\Microsoft\IdentityStore\Cache\$sid\IdentityCache\$sid"
+  if (Test-Path $ic) {
+    $p = Get-ItemProperty $ic -EA SilentlyContinue
+    if ($p.DisplayName) { $display = $p.DisplayName } elseif ($p.UserName) { $display = $p.UserName }
+  }
+  if (-not $display -and $_.FullName) { $display = $_.FullName }
+  [pscustomobject]@{
+    name    = $_.Name
+    display = $display
+    admin   = [bool]($admins -contains $_.Name)
+    enabled = [bool]$_.Enabled
+  }
+} | ConvertTo-Json -Compress -Depth 3
+"""
 
 
 def local_accounts():
-    """[(name, is_admin, enabled)] for the real people on this PC."""
-    ps = (r"$admins = @(); try { $admins = (Get-LocalGroupMember -Group Administrators -EA Stop |"
-          r" ForEach-Object { ($_.Name -split '\\')[-1] }) } catch {"
-          r" $admins = (net localgroup Administrators) }"
-          r"; Get-LocalUser | ForEach-Object {"
-          r" '{0}|{1}|{2}' -f $_.Name, ([bool]($admins -contains $_.Name)), $_.Enabled }")
-    out = powershell(["-Command", ps]).stdout
+    """[(name, display, is_admin, enabled)] for the real people on this PC."""
+    import json as _json
+    out = powershell(["-Command", _PS_ACCOUNTS]).strip()
+    if not out:
+        return []
+    try:
+        data = _json.loads(out)
+    except Exception:
+        return []
+    if isinstance(data, dict):
+        data = [data]
     rows = []
-    for line in out.splitlines():
-        parts = line.strip().split("|")
-        if len(parts) == 3 and parts[0]:
-            rows.append((parts[0], parts[1].lower() == "true", parts[2].lower() == "true"))
+    for d in data:
+        nm = (d.get("name") or "").strip()
+        if nm:
+            rows.append((nm, (d.get("display") or "").strip(),
+                         bool(d.get("admin")), bool(d.get("enabled"))))
     return rows
 
 
@@ -160,6 +194,7 @@ class Setup(tk.Tk):
         self.q = queue.Queue()
         self.accounts = []
         self.vars = {}
+        self.labels = {}
         self._build()
         self.after(120, self._load_accounts)
         self.after(150, self._drain)
@@ -223,18 +258,22 @@ class Setup(tk.Tk):
 
     def _load_accounts(self):
         try:
-            self.accounts = [a for a in local_accounts() if a[2]]
+            self.accounts = [a for a in local_accounts() if a[3]]
         except Exception as e:
             self.say("Không liệt kê được tài khoản: %s" % e)
             self.accounts = []
         skip = {"defaultaccount", "guest", "wdagutilityaccount", "administrator"}
-        for name, admin, _ in self.accounts:
+        for name, display, admin, _ in self.accounts:
             if name.lower() in skip:
                 continue
-            v = tk.BooleanVar(value=not admin)          # default: filter the non-admins
+            self.labels[name] = display or name
+            shown = display or name
+            if display and display.lower() != name.lower():
+                shown = "%s   (%s)" % (display, name)     # real name, then the Windows one
+            v = tk.BooleanVar(value=not admin)            # default: filter the non-admins
             self.vars[name] = v
-            tk.Checkbutton(self.users, variable=v, anchor="w", width=44,
-                           text="%s%s" % (name, "   (quản trị viên)" if admin else "")
+            tk.Checkbutton(self.users, variable=v, anchor="w", width=52,
+                           text="%s%s" % (shown, "   \u2014 quản trị viên" if admin else "")
                            ).pack(anchor="w")
         if not self.vars:
             tk.Label(self.users, fg="#a00",
@@ -278,8 +317,8 @@ class Setup(tk.Tk):
             messagebox.showwarning(APP, "Hãy chọn ít nhất một tài khoản để áp dụng.")
             return
         if not messagebox.askokcancel(
-                APP, "Sẽ áp dụng cho: %s\n\nTrình duyệt sẽ khởi động lại sau khi cài. Tiếp tục?"
-                     % ", ".join(chosen)):
+                APP, "Sẽ áp dụng cho:\n\n  %s\n\nTrình duyệt sẽ khởi động lại sau khi cài. Tiếp tục?"
+                     % "\n  ".join(self.labels.get(n, n) for n in chosen)):
             return
         self.btn.configure(state="disabled")
         self.status.configure(text="Đang cài đặt...")
