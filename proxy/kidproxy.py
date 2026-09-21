@@ -847,6 +847,10 @@ def _pid_for_port_windows(port):
         _fields_ = [("state", wintypes.DWORD), ("laddr", wintypes.DWORD), ("lport", wintypes.DWORD),
                     ("raddr", wintypes.DWORD), ("rport", wintypes.DWORD), ("pid", wintypes.DWORD)]
     iphlp = ctypes.windll.iphlpapi
+    iphlp.GetExtendedTcpTable.argtypes = [ctypes.c_void_p, ctypes.POINTER(wintypes.DWORD),
+                                          wintypes.BOOL, wintypes.ULONG,
+                                          ctypes.c_int, wintypes.ULONG]
+    iphlp.GetExtendedTcpTable.restype = wintypes.DWORD
     size = wintypes.DWORD(0)
     iphlp.GetExtendedTcpTable(None, ctypes.byref(size), False, 2, 5, 0)  # AF_INET=2, TCP_TABLE_OWNER_PID_ALL=5
     buf = ctypes.create_string_buffer(size.value)
@@ -862,8 +866,22 @@ def _user_for_pid_windows(pid):
     import ctypes
     from ctypes import wintypes
     adv, k32 = ctypes.windll.advapi32, ctypes.windll.kernel32
+    # Without these, ctypes assumes every function returns a C int. On 64-bit Windows a
+    # HANDLE is 64 bits, so the handle came back TRUNCATED and every call that used it
+    # failed - the lookup returned None, every connection looked like an unknown user,
+    # and the addon fails closed, which blocked everybody including administrators.
+    k32.OpenProcess.restype = wintypes.HANDLE
+    k32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    k32.CloseHandle.argtypes = [wintypes.HANDLE]
+    adv.OpenProcessToken.argtypes = [wintypes.HANDLE, wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE)]
+    adv.OpenProcessToken.restype = wintypes.BOOL
+    adv.GetTokenInformation.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p,
+                                        wintypes.DWORD, ctypes.POINTER(wintypes.DWORD)]
+    adv.GetTokenInformation.restype = wintypes.BOOL
     h = k32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
-    if not h: return None
+    if not h:
+        log(f"user lookup: OpenProcess({pid}) failed, err={ctypes.get_last_error()}")
+        return None
     try:
         tok = wintypes.HANDLE()
         if not adv.OpenProcessToken(h, 8, ctypes.byref(tok)): return None  # TOKEN_QUERY
@@ -905,11 +923,15 @@ def client_user(flow_or_ctx):
         port = peer[1]
         if platform.system() == "Windows":
             pid = _pid_for_port_windows(port)
-            if pid is None: return None
+            if pid is None:
+                log(f"user lookup: no process owns local port {port}")
+                return None
             now = time.time()
             u = _pid_user.get(pid)
             if u and now - u[1] < 60: return u[0]
             name = _user_for_pid_windows(pid)
+            if name is None:
+                log(f"user lookup: pid {pid} found but no account name")
             _pid_user[pid] = (name, now)
             return name
         return _user_for_port_linux(port)
