@@ -91,25 +91,27 @@ jobs:
         run: |
           # The lookup that cannot be tested anywhere but on Windows. If it returns nothing,
           # every connection is treated as unknown and fails closed - blocking everybody.
-          $probe = @'
-@echo off
-curl.exe -s -o NUL -w "  wayground.com (listed)    -> %%{http_code}\n" --max-time 25 -x http://127.0.0.1:8080 -k https://wayground.com/
-curl.exe -s -o NUL -w "  minecraft.net (unlisted)  -> %%{http_code}\n" --max-time 25 -x http://127.0.0.1:8080 -k https://www.minecraft.net/
-'@
-          Set-Content C:\probe.cmd $probe -Encoding ASCII
+          $lines = @(
+            '@echo off',
+            'curl.exe -s -o NUL -w "  wayground.com (listed)    -> %%{http_code}" --max-time 25 -x http://127.0.0.1:8080 -k https://wayground.com/',
+            'echo.',
+            'curl.exe -s -o NUL -w "  minecraft.net (unlisted)  -> %%{http_code}" --max-time 25 -x http://127.0.0.1:8080 -k https://www.minecraft.net/',
+            'echo.'
+          )
+          Set-Content C:\probe.cmd $lines -Encoding ASCII
           icacls C:\probe.cmd /grant "${env:KIDUSER}:(RX)" *>$null
 
-          Write-Host "--- as the ADMINISTRATOR (not in enforceUsers: expect both to pass) ---"
+          Write-Host "--- as the ADMINISTRATOR (not enforced: expect both to pass) ---"
           & cmd.exe /c C:\probe.cmd
 
           Write-Host "--- as $env:KIDUSER (enforced: expect 200 then 403) ---"
-          $sec = ConvertTo-SecureString $env:KIDPASS -AsPlainText -Force
-          $c = New-Object PSCredential($env:KIDUSER, $sec)
           $out = "C:\Users\Public\kidout.txt"
           Remove-Item $out -Force -EA SilentlyContinue
-          Set-Content C:\kidrun.cmd "call C:\probe.cmd > $out 2>&1" -Encoding ASCII
+          Set-Content C:\kidrun.cmd @("@echo off", "call C:\probe.cmd > $out 2>&1") -Encoding ASCII
           icacls C:\kidrun.cmd /grant "${env:KIDUSER}:(RX)" *>$null
           icacls C:\Users\Public /grant "${env:KIDUSER}:(OI)(CI)M" *>$null
+          $sec = ConvertTo-SecureString $env:KIDPASS -AsPlainText -Force
+          $c = New-Object PSCredential($env:KIDUSER, $sec)
           try {
             Start-Process cmd.exe -Credential $c -ArgumentList "/c","C:\kidrun.cmd" -LoadUserProfile -Wait -EA Stop
           } catch { Write-Host "  could not start as $env:KIDUSER : $($_.Exception.Message)" }
