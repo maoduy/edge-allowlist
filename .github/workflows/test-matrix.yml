@@ -317,9 +317,19 @@ jobs:
           $usage = '{"v":2,"days":{"' + $day + '":{"kid1":{"*":[' + $spent + ']}}}}'
           [System.IO.File]::WriteAllText("C:\ProgramData\KidNest\usage-state.json", $usage,
                                          (New-Object System.Text.UTF8Encoding($false)))
-          Stop-ScheduledTask -TaskName KidNest; Start-Sleep 2
-          Start-ScheduledTask -TaskName KidNest; Start-Sleep 12
-          Get-Content "C:\ProgramData\KidNest\kidproxy.log" -Tail 6
+          # Stop-ScheduledTask alone leaves mitmdump running, so the old config stays live
+          Stop-ScheduledTask -TaskName KidNest
+          Stop-Process -Name mitmdump -Force -EA SilentlyContinue
+          Start-Sleep 3
+          Remove-Item "C:\ProgramData\KidNest\kidproxy.log" -Force -EA SilentlyContinue
+          Start-ScheduledTask -TaskName KidNest; Start-Sleep 15
+          $log = Get-Content "C:\ProgramData\KidNest\kidproxy.log" -Raw
+          Write-Host $log
+          # prove the local sheet is the one in force before judging anything else
+          if ($log -notmatch "lists loaded: (\d+) domains") { throw "no list loaded at all" }
+          $n = [int]$Matches[1]
+          Write-Host "domains loaded: $n"
+          if ($n -gt 20) { throw "still reading the production sheet ($n domains) - the config override did not take" }
 
       - name: kid1 is out of time, kid2 is not
         shell: pwsh
