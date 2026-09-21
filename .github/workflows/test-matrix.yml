@@ -69,7 +69,10 @@ jobs:
           Write-Host "admin : $env:ADMUSER (Administrators)  - NOT the runner's own account"
 
       - name: Install
-        shell: pwsh
+        # powershell, NOT pwsh: real machines run Windows PowerShell 5.1, whose
+        # Set-Content -Encoding UTF8 writes a BOM. pwsh does not, so testing under it
+        # hid a config file the addon could not parse.
+        shell: powershell
         run: |
           $enforce = if ("${{ matrix.mode }}" -eq "all-users") { "$env:KIDUSER,$env:ADMUSER" } else { $env:KIDUSER }
           Write-Host "-EnforceUsers $enforce"
@@ -138,8 +141,10 @@ jobs:
           if (-not (Test-Path $log)) { $fail += "no log written" }
           else {
             $l = Get-Content $log -Raw
-            if ($l -notmatch "lists loaded") { $fail += "the sheet never loaded" }
-            if ($l -match "\(None\)")        { $fail += "user lookup returned None" }
+            if ($l -notmatch "lists loaded")   { $fail += "the sheet never loaded" }
+            if ($l -match "\(None\)")          { $fail += "user lookup returned None" }
+            if ($l -match "config: kidproxy")  { $fail += "the addon could not read its own config" }
+            if ($l -match "sheet=NONE SET")    { $fail += "sheetId did not survive into the config" }
           }
 
           $status = if ($fail) { "FAIL" } else { "PASS" }
@@ -229,7 +234,7 @@ jobs:
           Write-Host "8080 held: $((Test-NetConnection 127.0.0.1 -Port 8080 -InformationLevel Quiet -WarningAction SilentlyContinue))"
 
       - name: Install - must abort, not brick the machine
-        shell: pwsh
+        shell: powershell
         run: |
           $ok = $true
           try { .\payload\install.ps1 -SheetId "${{ inputs.sheet }}" -EnforceUsers $env:KIDUSER } catch { $ok = $false }

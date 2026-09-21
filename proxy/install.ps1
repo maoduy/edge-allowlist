@@ -138,7 +138,9 @@ if ($LogSheetId) {
 } else {
   Write-Host "URL log -> local only (http://kidproxy.local/log)"
 }
-$cfg | ConvertTo-Json -Depth 5 | Set-Content -Path "$Dir\kidproxy.json" -Encoding UTF8
+# NOT Set-Content -Encoding UTF8: on Windows PowerShell 5.1 that writes a BOM.
+[System.IO.File]::WriteAllText("$Dir\kidproxy.json", ($cfg | ConvertTo-Json -Depth 5),
+                               (New-Object System.Text.UTF8Encoding($false)))
 
 # 3. scheduled tasks (SYSTEM, at boot, no time limit, restart on failure) + watchdog
 $exe = "$Dir\mitmdump.exe"

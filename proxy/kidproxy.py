@@ -89,7 +89,10 @@ def _pick_data_dir(preferred):
     return HERE
 
 try:
-    with open(os.path.join(HERE, "kidproxy.json"), encoding="utf-8") as f:
+    # utf-8-sig, not utf-8: Windows PowerShell 5.1's Set-Content -Encoding UTF8 writes a
+    # BOM, and a plain utf-8 read then fails on the very first character - the config is
+    # silently discarded, sheetId comes back empty and everything is blocked.
+    with open(os.path.join(HERE, "kidproxy.json"), encoding="utf-8-sig") as f:
         _user_cfg = json.load(f)
     _ul = dict(DEFAULTS["urlLog"]); _ul.update(_user_cfg.pop("urlLog", {}) or {})
     CFG.update(_user_cfg); CFG["urlLog"] = _ul
