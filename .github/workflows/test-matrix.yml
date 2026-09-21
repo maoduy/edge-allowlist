@@ -161,8 +161,98 @@ jobs:
         run: |
           .\payload\reset-clean.ps1
           $left = @()
-          if (Get-ScheduledTask -TaskName KidNest -EA SilentlyContinue) { $left += "task" }
+          foreach ($t in "KidNest","KidNest Watchdog","KidNest Resume") {
+            if (Get-ScheduledTask -TaskName $t -EA SilentlyContinue) { $left += "task $t" }
+          }
           if (Test-Path 'C:\Program Files\KidNest') { $left += "program dir" }
           if (Test-Path 'C:\ProgramData\KidNest')   { $left += "data dir" }
-          if ($left) { Write-Host "LEFT BEHIND: $($left -join ', ')"; exit 1 }
+          if (Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\KidNest') { $left += "uninstall entry" }
+          if (Test-Path 'HKLM:\SOFTWARE\Policies\Microsoft\Edge') { $left += "HKLM Edge policy" }
+          if (Test-Path "$env:SystemRoot\System32\kidnest.cmd") { $left += "kidnest.cmd" }
+          $left += @(Get-ChildItem "C:\Users\*\Desktop\KidNest*.lnk" -EA SilentlyContinue | ForEach-Object { "shortcut $($_.Name)" })
+          $left += @(Get-ChildItem "C:\Users\*\AppData\Local\Temp\KidNest" -Directory -EA SilentlyContinue | ForEach-Object { "temp data $($_.FullName)" })
+          # every enforced account's own hive must be free of the proxy again
+          foreach ($u in $env:KIDUSER, $env:ADMUSER) {
+            $sid = (New-Object Security.Principal.NTAccount($u)).Translate([Security.Principal.SecurityIdentifier]).Value
+            New-PSDrive -PSProvider Registry -Name HKU -Root HKEY_USERS -EA SilentlyContinue | Out-Null
+            $ld = $false
+            if (-not (Test-Path "HKU:\$sid")) { & reg.exe load "HKU\$sid" "C:\Users\$u\NTUSER.DAT" *>$null; $ld = $true }
+            $pm = (Get-ItemProperty "HKU:\$sid\Software\Policies\Microsoft\Edge" -EA SilentlyContinue).ProxyMode
+            $pe = (Get-ItemProperty "HKU:\$sid\Software\Microsoft\Windows\CurrentVersion\Internet Settings" -EA SilentlyContinue).ProxyEnable
+            if ($pm) { $left += "$u still has Edge ProxyMode=$pm" }
+            if ($pe -eq 1) { $left += "$u still has ProxyEnable=1" }
+            if ($ld) { [gc]::Collect(); & reg.exe unload "HKU\$sid" *>$null }
+          }
+          if ($left) { Write-Host "LEFT BEHIND: $($left -join '; ')"; exit 1 }
           Write-Host "machine clean"
+
+  failed-install:
+    name: install fails halfway, then reset
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Stage payload
+        shell: pwsh
+        run: |
+          $url = "https://downloads.mitmproxy.org/$env:MITM_VERSION/mitmproxy-$env:MITM_VERSION-windows-x86_64.zip"
+          Invoke-WebRequest -Uri $url -OutFile mitm.zip -UseBasicParsing
+          Expand-Archive mitm.zip -DestinationPath mitm -Force
+          New-Item -ItemType Directory -Force -Path payload | Out-Null
+          Copy-Item mitm\mitmdump.exe payload\ -Force
+          Copy-Item proxy\install.ps1, proxy\uninstall.ps1, proxy\kidproxy.py, proxy\sheetlog.py, `
+                    proxy\kidproxy.cmd, proxy\diagnose.ps1, proxy\kidnest-pause.ps1, `
+                    setup\reset-clean.ps1, setup\KidNest-Unlock.bat payload\ -Force
+          $sec = ConvertTo-SecureString $env:TESTPASS -AsPlainText -Force
+          New-LocalUser -Name $env:KIDUSER -Password $sec -AccountNeverExpires -PasswordNeverExpires | Out-Null
+          $c = New-Object PSCredential($env:KIDUSER, $sec)
+          Start-Process cmd.exe -Credential $c -ArgumentList "/c","echo ." -LoadUserProfile -Wait -NoNewWindow
+
+      - name: Hold port 8080 so the proxy cannot start
+        shell: pwsh
+        run: |
+          # Exactly yesterday's shape: everything installs, the proxy never comes up.
+          Start-Job -Name hog -ScriptBlock {
+            $l = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 8080)
+            $l.Start(); Start-Sleep -Seconds 600
+          } | Out-Null
+          Start-Sleep -Seconds 5
+          Write-Host "8080 held: $((Test-NetConnection 127.0.0.1 -Port 8080 -InformationLevel Quiet -WarningAction SilentlyContinue))"
+
+      - name: Install - must abort, not brick the machine
+        shell: pwsh
+        run: |
+          $ok = $true
+          try { .\payload\install.ps1 -SheetId "${{ inputs.sheet }}" -EnforceUsers $env:KIDUSER } catch { $ok = $false }
+          Write-Host "--- the machine must still be usable ---"
+          $pe = (Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Internet Settings" -EA SilentlyContinue).ProxyEnable
+          $edge = (Get-ItemProperty "HKLM:\SOFTWARE\Policies\Microsoft\Edge" -EA SilentlyContinue).ProxyMode
+          Write-Host "HKLM ProxyEnable = $pe   (must not be 1)"
+          Write-Host "HKLM Edge ProxyMode = $edge   (must be empty)"
+          $code = (& curl.exe -s -o NUL -w "%{http_code}" --max-time 25 https://www.google.com/)
+          Write-Host "direct internet still works: $code"
+          $bad = @()
+          if ($pe -eq 1)  { $bad += "the machine was left pointing at a dead proxy" }
+          if ($edge)      { $bad += "Edge was left pointing at a dead proxy" }
+          if ($code -notmatch '^[23]') { $bad += "no internet after the failed install (got $code)" }
+          if ($bad) { $bad | ForEach-Object { Write-Host "FAIL: $_" }; exit 1 }
+          Write-Host "PASS - aborted without taking the machine offline"
+
+      - name: Now reset, and prove nothing survives
+        shell: pwsh
+        run: |
+          Stop-Job -Name hog -EA SilentlyContinue; Remove-Job -Name hog -Force -EA SilentlyContinue
+          .\payload\reset-clean.ps1
+          $left = @()
+          foreach ($t in "KidNest","KidNest Watchdog","KidNest Resume") {
+            if (Get-ScheduledTask -TaskName $t -EA SilentlyContinue) { $left += "task $t" }
+          }
+          foreach ($p in 'C:\Program Files\KidNest', 'C:\ProgramData\KidNest',
+                         "$env:SystemRoot\System32\kidnest.cmd",
+                         'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\KidNest',
+                         'HKLM:\SOFTWARE\Policies\Microsoft\Edge') {
+            if (Test-Path $p) { $left += $p }
+          }
+          $left += @(Get-ChildItem "C:\Users\*\Desktop\KidNest*.lnk" -EA SilentlyContinue | ForEach-Object { $_.FullName })
+          if ($left) { Write-Host "LEFT BEHIND: $($left -join '; ')"; exit 1 }
+          Write-Host "machine clean after a failed install"

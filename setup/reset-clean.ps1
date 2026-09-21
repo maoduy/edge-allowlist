@@ -58,7 +58,7 @@ function Say($m) { Write-Host $m }
 if ($DryRun) { Say "DRY RUN - nothing will be changed.`n" } else { Say "Backup: $BackupTo`n" }
 
 # ---------------------------------------------------------------- 1. stop it running
-foreach ($t in "KidNest Watchdog", "KidNest", "KidProxy Watchdog", "KidProxy") {
+foreach ($t in "KidNest Watchdog", "KidNest", "KidNest Resume", "KidProxy Watchdog", "KidProxy") {
   if (Get-ScheduledTask -TaskName $t -ErrorAction SilentlyContinue) {
     if (-not $DryRun) {
       Stop-ScheduledTask -TaskName $t -ErrorAction SilentlyContinue
@@ -80,6 +80,7 @@ $killKeys = @(
   "HKLM\SOFTWARE\Policies\Google\Chrome",
   "HKCU\SOFTWARE\Policies\Microsoft\Edge",
   "HKCU\SOFTWARE\Policies\Google\Chrome",
+  "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\KidNest",
   "HKLM\SOFTWARE\Policies\Microsoft\Internet Explorer\Control Panel",
   "HKCU\SOFTWARE\Policies\Microsoft\Internet Explorer\Control Panel"
 )
@@ -193,6 +194,17 @@ $killPaths = @(
   "$env:SystemRoot\System32\kidnest.cmd",
   "$env:SystemRoot\System32\kidproxy.cmd"
 )
+# The data dir falls back to TEMP when ProgramData is unwritable, and the installer
+# leaves a rescue shortcut on the installing administrator's desktop. Both are easy to
+# forget and both keep a "clean" machine dirty.
+$killPaths += @(Get-ChildItem "C:\Users\*\Desktop\KidNest*.lnk" -EA SilentlyContinue |
+                ForEach-Object { $_.FullName })
+$killPaths += "C:\Users\Public\Desktop\KidNest - Khoi phuc mang.lnk"
+$killPaths += @(Get-ChildItem "C:\Users\*\AppData\Local\Temp\KidNest" -Directory -EA SilentlyContinue |
+                ForEach-Object { $_.FullName })
+$killPaths += "C:\Windows\Temp\KidNest"
+$killPaths += "$env:TEMP\KidNest"
+
 foreach ($p in $killPaths) {
   if (Test-Path $p) {
     if (-not $DryRun) {
@@ -249,8 +261,22 @@ foreach ($k in $killKeys) {
   $ps = $k -replace '^HKLM\\', 'HKLM:\' -replace '^HKCU\\', 'HKCU:\'
   if (Test-Path $ps) { Say "STILL THERE: $k"; $leftovers++ }
 }
-foreach ($t in "KidNest", "KidProxy") {
+foreach ($t in "KidNest", "KidNest Watchdog", "KidNest Resume", "KidProxy") {
   if (Get-ScheduledTask -TaskName $t -ErrorAction SilentlyContinue) { Say "STILL THERE: task $t"; $leftovers++ }
+}
+if (Test-Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\KidNest") {
+  Say "STILL THERE: the Add/Remove Programs entry"; $leftovers++
+}
+foreach ($stray in @(Get-ChildItem "C:\Users\*\Desktop\KidNest*.lnk" -EA SilentlyContinue) +
+                   @(Get-ChildItem "C:\Users\*\AppData\Local\Temp\KidNest" -Directory -EA SilentlyContinue)) {
+  Say "STILL THERE: $($stray.FullName)"; $leftovers++
+}
+# a hive that could not be opened means that account was never cleaned
+$skipped = @($done | Where-Object { $_.Result -like "*locked*" })
+if ($skipped) {
+  Say "NOT CLEANED (profile in use - log that user off and re-run):"
+  $skipped | ForEach-Object { Say "   $($_.Item)" }
+  $leftovers += $skipped.Count
 }
 $pe = (Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Internet Settings" -Name ProxyEnable -EA SilentlyContinue).ProxyEnable
 Say ("machine ProxyEnable : " + $(if ($null -eq $pe) { "not set" } else { $pe }))
