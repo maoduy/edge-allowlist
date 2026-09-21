@@ -824,7 +824,14 @@ def _local_admins():
     names = set()
     try:
         if platform.system() == "Windows":
-            out = subprocess.run(["net", "localgroup", "Administrators"], capture_output=True, text=True, timeout=10).stdout
+            # by SID, because "Administrators" is translated on a localised Windows
+            ps = (r"Get-LocalGroupMember -SID S-1-5-32-544 | "
+                  r"ForEach-Object { ($_.Name -split '\\')[-1] }")
+            out = subprocess.run(["powershell", "-NoProfile", "-Command", ps],
+                                 capture_output=True, text=True, timeout=20).stdout
+            if not out.strip():
+                out = subprocess.run(["net", "localgroup", "Administrators"],
+                                     capture_output=True, text=True, timeout=10).stdout
             body = out.split("---", 2)[-1] if "---" in out else out
             for line in body.splitlines():
                 l = line.strip()

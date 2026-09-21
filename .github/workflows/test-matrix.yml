@@ -214,7 +214,8 @@ jobs:
           # The setup window must show the person's real name, not the account id
           # Windows derives from a Microsoft account ("nguye").
           Set-LocalUser -Name $env:KIDUSER -FullName "Nguyễn Duy Phước An"
-          python -c "import sys; sys.path.insert(0,'setup'); import kidnest_setup as k; print(k.local_accounts())"
+          $env:PYTHONIOENCODING = "utf-8"
+          python -c "import sys; sys.path.insert(0,'setup'); import kidnest_setup as k; [print(r) for r in k.local_accounts()]"
 
       - name: Hold port 8080 so the proxy cannot start
         shell: pwsh

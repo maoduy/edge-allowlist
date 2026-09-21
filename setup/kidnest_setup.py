@@ -66,8 +66,13 @@ def powershell(args, cwd=None):
 _PS_ACCOUNTS = r"""
 [Console]::OutputEncoding = [Text.Encoding]::UTF8
 $admins = @()
-try { $admins = @(Get-LocalGroupMember -Group Administrators -EA Stop |
+# S-1-5-32-544, not the word: built-in group names are translated on a localised Windows.
+try { $admins = @(Get-LocalGroupMember -SID S-1-5-32-544 -EA Stop |
                   ForEach-Object { ($_.Name -split '\\')[-1] }) } catch { }
+if (-not $admins) {
+  try { $admins = @(Get-LocalGroupMember -Group Administrators -EA Stop |
+                    ForEach-Object { ($_.Name -split '\\')[-1] }) } catch { }
+}
 Get-LocalUser | ForEach-Object {
   $sid = $_.SID.Value
   $display = $null

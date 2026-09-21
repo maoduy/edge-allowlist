@@ -249,8 +249,14 @@ $targets = @()
 if ($EnforceUsers) {
   $targets = @($EnforceUsers)
 } else {
-  $admins = @((Get-LocalGroupMember -Group Administrators -EA SilentlyContinue |
-               ForEach-Object { ($_.Name -split '\\')[-1] }))
+  # S-1-5-32-544, not the word "Administrators": the group name is translated on a
+  # localised Windows, and a friend's machine may not be in English.
+  $admins = @(Get-LocalGroupMember -SID S-1-5-32-544 -EA SilentlyContinue |
+              ForEach-Object { ($_.Name -split '\\')[-1] })
+  if (-not $admins) {
+    $admins = @(Get-LocalGroupMember -Group Administrators -EA SilentlyContinue |
+                ForEach-Object { ($_.Name -split '\\')[-1] })
+  }
   $targets = @(Get-LocalUser | Where-Object { $_.Enabled -and $admins -notcontains $_.Name } |
                ForEach-Object { $_.Name })
   $targets = @($targets | Where-Object { $ExemptUsers -notcontains $_ })
