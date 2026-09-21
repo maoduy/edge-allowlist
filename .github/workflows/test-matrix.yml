@@ -2,10 +2,14 @@ name: Test matrix
 
 # Four scenarios: two Windows generations x two enforcement modes.
 #
-# GitHub offers no Windows 10/11 CLIENT images, only Server. windows-2019 shares the
-# Windows 10 codebase, windows-2022 and windows-2025 the Windows 11 one. Same kernel,
-# same APIs KidNest touches - but not a client SKU, so client-only behaviour (S mode,
-# Family Safety, an OEM's antivirus) is still not covered here.
+# GitHub offers no Windows 10/11 CLIENT images, only Server, and windows-2019 - the
+# Windows 10 generation - was retired: jobs requesting it queue forever. So this covers
+# the Windows 11 generation only (2022 and 2025).
+#
+# What that leaves untested: the Windows 10 build, and anything client-only (S mode,
+# Family Safety, an OEM antivirus). The one bug this caught - ctypes truncating 64-bit
+# handles - depends on the architecture, not the Windows version, so it would behave the
+# same on 10; that is reasoning, not evidence.
 #
 # The "all users" mode filters a PURPOSE-MADE administrator account, never the runner's
 # own: routing the runner through the proxy would cut off the job itself.
@@ -31,7 +35,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-2019, windows-2022, windows-2025]
+        os: [windows-2022, windows-2025]
         mode: [standard-only, all-users]
     name: ${{ matrix.os }} / ${{ matrix.mode }}
     runs-on: ${{ matrix.os }}
