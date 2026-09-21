@@ -51,6 +51,10 @@ DEFAULTS = {
     # (scripts, images, video, embedded players) are allowed automatically via Referer/Origin.
     "smartDependencies": True,
     "dependencyTtlSeconds": 3600,
+    # A minute counts toward a budget after this many browser requests, or at once on a
+    # page navigation. Stops a background tab burning the day's allowance while nobody
+    # is at the machine. 1 = count every minute that saw any browser traffic.
+    "activityRequests": 3,
     "dataDir": "",          # empty -> C:\ProgramData\KidNest
     "logFile": "",          # empty -> kidproxy.log inside dataDir
     # URL log -> Google Sheet: one tab per month "MM-yyyy", row = URL, column = day, cell = hits.
@@ -103,6 +107,8 @@ except Exception as e:
     CFG["_configError"] = "kidproxy.json is malformed: %s" % e
 
 DATA = _pick_data_dir(CFG.get("dataDir"))
+
+GLOBAL = "*"          # the whole-internet budget, written as a "*" row in the sheet
 
 YT_HOSTS = {"youtube.com", "www.youtube.com", "m.youtube.com", "youtubei.googleapis.com"}
 HEADERS = {"site", "sites", "website", "websites", "domain", "domains", "url", "urls", "channel", "channels", "kênh", "trang", "trang web"}
@@ -217,8 +223,12 @@ def _sites_with_limits(text):
         v = row[0].strip()
         if not v or v.startswith("#") or v.lower() in HEADERS:
             continue
-        sites.append(v)
         mins = _parse_minutes(row[2] if len(row) > 2 else "")
+        if v.strip() in ("*", "**"):        # the whole-internet budget, not a site
+            if mins:
+                limits[GLOBAL] = mins
+            continue
+        sites.append(v)
         if mins:
             kind, dom = _norm_site(v)
             if kind == "domain":
@@ -509,13 +519,17 @@ CONTROL_HTML = """<!doctype html><html lang="vi"><meta charset="utf-8"><title>Ki
 
 
 def _usage_lines():
-    """[(domain, used, cap)] for every site that has a daily budget."""
+    """[(user, domain, used, cap)] - every budget, for every account that used one."""
     with lock:
         caps = dict(L.limits)
     if not caps or _shared.usage is None:
         return []
     today = _shared.usage.today()
-    return [(d, today.get(d, 0), c) for d, c in sorted(caps.items())]
+    rows = []
+    for who in sorted(today) or [""]:
+        for d, c in sorted(caps.items()):
+            rows.append((who, d, today.get(who, {}).get(d, 0), c))
+    return rows
 
 
 def _control_stats():
@@ -528,8 +542,9 @@ def _control_stats():
                  if ok else "chưa lần nào")]
     if err:
         lines.append("Lỗi                 : %s" % err)
-    for d, used, cap in _usage_lines():
-        lines.append("%-20s: %d/%d phút hôm nay" % (d, used, cap))
+    for who, d, used, cap in _usage_lines():
+        lines.append("%-10s %-16s: %d/%d phút hôm nay"
+                     % (who, "TẤT CẢ" if d == GLOBAL else d, used, cap))
     return "\n".join(lines)
 
 
@@ -599,9 +614,12 @@ def log_page(query):
     rows = _usage_lines() if want == cur else []
     if rows:
         budget = ("<h2>Thời gian hôm nay</h2><div class='wrap'><table><thead><tr>"
-                  "<th>Trang</th><th>Đã dùng</th><th>Giới hạn</th><th>Còn lại</th></tr></thead><tbody>"
-                  + "".join("<tr><th>%s</th><td>%d</td><td>%d</td><td class='tot'>%d</td></tr>"
-                            % (_esc(d), u, c, max(0, c - u)) for d, u, c in rows)
+                  "<th>Tài khoản</th><th>Trang</th><th>Đã dùng</th><th>Giới hạn</th>"
+                  "<th>Còn lại</th></tr></thead><tbody>"
+                  + "".join("<tr><th>%s</th><td style='text-align:left'>%s</td>"
+                            "<td>%d</td><td>%d</td><td class='tot'>%d</td></tr>"
+                            % (_esc(w), _esc("TẤT CẢ" if d == GLOBAL else d), u, c, max(0, c - u))
+                            for w, d, u, c in rows)
                   + "</tbody></table></div>")
     tables = (budget + "<h2>Đã vào</h2>" + _log_table(want, today) +
               "<h2>Bị chặn</h2>" + _log_table(want + " chan", today))
@@ -687,37 +705,65 @@ def _refresher():
             time.sleep(delay)
             delay = min(delay * 2, 120)
 
+
 class Usage:
-    """Which minutes of the day each limited site was active in. A minute counts once no
-    matter how many requests it held, so 30 minutes of YouTube means 30 distinct minutes."""
+    """Which minutes of the day each account spent on each limited site, plus a "*" total
+    across everything. A minute counts once however many requests it held, and it is
+    counted PER ACCOUNT - one child running out does not spend another's allowance.
+
+    A minute only counts once it looks like real use: a page navigation, or enough
+    requests to rule out a background tab polling while nobody is at the machine."""
+
+    VERSION = 2
 
     def __init__(self, path, log=print):
         self.path, self.log = path, log
         self.lock = threading.Lock()
-        self.days = {}                   # "YYYY-MM-DD" -> {domain: set(minute-of-day)}
+        self.days = {}          # day -> user -> domain -> set(minute-of-day)
+        self._pending = {}      # (day, user, domain, minute) -> requests seen so far
         try:
-            with open(path, encoding="utf-8") as f:
-                for day, doms in json.load(f).items():
-                    self.days[day] = {k: set(v) for k, v in doms.items()}
+            with open(path, encoding="utf-8-sig") as f:
+                blob = json.load(f)
+            if blob.get("v") == self.VERSION:       # v1 had no per-user dimension
+                for day, users in (blob.get("days") or {}).items():
+                    self.days[day] = {u: {k: set(v) for k, v in doms.items()}
+                                      for u, doms in users.items()}
         except Exception:
             pass
 
-    def used(self, day, domain):
+    # ------------------------------------------------------------------ reads
+    def used(self, day, user, domain):
         with self.lock:
-            return len(self.days.get(day, {}).get(domain, ()))
+            return len(self.days.get(day, {}).get(user, {}).get(domain, ()))
 
-    def has(self, day, domain, minute):
+    def has(self, day, user, domain, minute):
         with self.lock:
-            return minute in self.days.get(day, {}).get(domain, ())
-
-    def touch(self, day, domain, minute):
-        with self.lock:
-            self.days.setdefault(day, {}).setdefault(domain, set()).add(minute)
+            return minute in self.days.get(day, {}).get(user, {}).get(domain, ())
 
     def today(self):
+        """{user: {domain: minutes}} for today."""
         day = time.strftime("%Y-%m-%d")
         with self.lock:
-            return {k: len(v) for k, v in self.days.get(day, {}).items()}
+            return {u: {k: len(v) for k, v in doms.items()}
+                    for u, doms in self.days.get(day, {}).items()}
+
+    # ------------------------------------------------------------------ writes
+    def touch(self, day, user, domain, minute):
+        with self.lock:
+            self.days.setdefault(day, {}).setdefault(user, {}).setdefault(domain, set()).add(minute)
+
+    def note(self, day, user, domain, minute, nav, threshold):
+        """Count this minute once it is clearly someone using the machine."""
+        if self.has(day, user, domain, minute):
+            return
+        key = (day, user, domain, minute)
+        with self.lock:
+            seen = self._pending.get(key, 0) + 1
+            self._pending[key] = seen
+        if nav or seen >= max(1, threshold):
+            self.touch(day, user, domain, minute)
+            with self.lock:
+                self._pending.pop(key, None)
 
     def save(self):
         keep = {time.strftime("%Y-%m-%d"), time.strftime("%Y-%m-%d", time.localtime(time.time() - 86400))}
@@ -725,8 +771,11 @@ class Usage:
             with self.lock:
                 for stale in [d for d in self.days if d not in keep]:
                     del self.days[stale]
-                blob = json.dumps({d: {k: sorted(v) for k, v in doms.items()}
-                                   for d, doms in self.days.items()})
+                for k in [k for k in self._pending if k[0] not in keep]:
+                    del self._pending[k]
+                blob = json.dumps({"v": self.VERSION, "days": {
+                    d: {u: {k: sorted(v) for k, v in doms.items()} for u, doms in users.items()}
+                    for d, users in self.days.items()}})
             tmp = self.path + ".tmp"
             with open(tmp, "w", encoding="utf-8") as f:
                 f.write(blob)
@@ -1169,34 +1218,48 @@ class KidProxy:
             blocked = True
             flow.response = blocked_page("YouTube Shorts đã bị tắt", "") if path.startswith("/shorts") else http.Response.make(403, b"shorts blocked")
         if not blocked:
-            blocked = self._meter(flow, nav)
+            blocked = self._meter(flow, nav, user)
         # a /watch page is only really "allowed" once the channel check in response() passes
         if not (host in YT_HOSTS and path.split("?")[0] == "/watch" and nav and not blocked):
             record_url(flow, blocked, user, nav)
 
-    def _meter(self, flow, nav):
-        """Daily time budget from column C of the websites tab. A minute counts once however
-        many requests it held, and a minute already paid for runs to its end."""
+    def _meter(self, flow, nav, user):
+        """Daily time budgets: one per site from column C, plus the "*" row covering all
+        web use. Both are counted per account, so one child cannot spend another's."""
         u = _shared.usage
         if u is None:
             return False
-        dom, cap = limited_site(flow)
-        if not dom:
+        # Only browser traffic is metered. Windows Update and background apps send no
+        # Sec-Fetch-Dest, and should not burn a child's allowance.
+        if not flow.request.headers.get("sec-fetch-dest", ""):
             return False
+        who = (user or "?").lower()
         now = time.localtime()
         day, minute = time.strftime("%Y-%m-%d", now), now.tm_hour * 60 + now.tm_min
-        used = u.used(day, dom)
-        if used < cap or u.has(day, dom, minute):
-            u.touch(day, dom, minute)
-            return False
-        if nav:
-            flow.response = blocked_page(
-                "Hết giờ cho %s hôm nay" % dom,
-                "Đã dùng %d/%d phút. Mai được dùng tiếp." % (used, cap))
-        else:
-            flow.response = http.Response.make(403, b"kidproxy: daily time limit reached")
-        log(f"LIMIT {dom} {used}/{cap}m ({flow.request.host})")
-        return True
+        site, site_cap = limited_site(flow)
+        with lock:
+            total_cap = L.limits.get(GLOBAL, 0)
+        threshold = int(CFG.get("activityRequests", 3))
+
+        for target, cap, label in ((site, site_cap, site),
+                                   (GLOBAL, total_cap, None)):
+            if not target or not cap:
+                continue
+            used = u.used(day, who, target)
+            if used >= cap and not u.has(day, who, target, minute):
+                if label:
+                    title = "Hết giờ cho %s hôm nay" % label
+                else:
+                    title = "Hết giờ vào mạng hôm nay"
+                if nav:
+                    flow.response = blocked_page(
+                        title, "Đã dùng %d/%d phút. Mai được dùng tiếp." % (used, cap))
+                else:
+                    flow.response = http.Response.make(403, b"kidnest: daily time limit reached")
+                log(f"LIMIT {target} {used}/{cap}m ({who})")
+                return True
+            u.note(day, who, target, minute, nav, threshold)
+        return False
 
     def response(self, flow: http.HTTPFlow):
         host, path = flow.request.host.lower(), flow.request.path

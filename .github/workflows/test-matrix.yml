@@ -270,3 +270,85 @@ jobs:
           $left += @(Get-ChildItem "C:\Users\*\Desktop\KidNest*.lnk" -EA SilentlyContinue | ForEach-Object { $_.FullName })
           if ($left) { Write-Host "LEFT BEHIND: $($left -join '; ')"; exit 1 }
           Write-Host "machine clean after a failed install"
+
+  budgets:
+    name: time budgets, two children
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Stage payload and two child accounts
+        shell: pwsh
+        run: |
+          $url = "https://downloads.mitmproxy.org/$env:MITM_VERSION/mitmproxy-$env:MITM_VERSION-windows-x86_64.zip"
+          Invoke-WebRequest -Uri $url -OutFile mitm.zip -UseBasicParsing
+          Expand-Archive mitm.zip -DestinationPath mitm -Force
+          New-Item -ItemType Directory -Force -Path payload | Out-Null
+          Copy-Item mitm\mitmdump.exe payload\ -Force
+          Copy-Item proxy\install.ps1, proxy\uninstall.ps1, proxy\kidproxy.py, proxy\sheetlog.py, `
+                    proxy\kidproxy.cmd, proxy\diagnose.ps1, proxy\kidnest-pause.ps1, `
+                    setup\reset-clean.ps1, setup\KidNest-Unlock.bat payload\ -Force
+          $sec = ConvertTo-SecureString $env:TESTPASS -AsPlainText -Force
+          foreach ($u in "kid1", "kid2") {
+            New-LocalUser -Name $u -Password $sec -AccountNeverExpires -PasswordNeverExpires | Out-Null
+            $c = New-Object PSCredential($u, $sec)
+            Start-Process cmd.exe -Credential $c -ArgumentList "/c","echo ." -LoadUserProfile -Wait -NoNewWindow
+          }
+
+      - name: Install
+        shell: powershell
+        run: .\payload\install.ps1 -SheetId "${{ inputs.sheet }}" -EnforceUsers kid1,kid2
+
+      - name: Point it at a one-minute global budget, and spend kid1's
+        shell: pwsh
+        run: |
+          # "*" is the whole-internet budget. One minute makes the test quick.
+          Set-Content C:\sites.csv @("Trang web,Ghi chu,Gioi han", "*,Tong moi ngay,1", "example.com,,") -Encoding UTF8
+          Set-Content C:\chans.csv @("Kenh") -Encoding UTF8
+          $cfgPath = "C:\Program Files\KidNest\kidproxy.json"
+          $cfg = Get-Content $cfgPath -Raw | ConvertFrom-Json
+          $cfg | Add-Member -NotePropertyName sitesUrl    -NotePropertyValue "file:///C:/sites.csv" -Force
+          $cfg | Add-Member -NotePropertyName channelsUrl -NotePropertyValue "file:///C:/chans.csv" -Force
+          [System.IO.File]::WriteAllText($cfgPath, ($cfg | ConvertTo-Json -Depth 5),
+                                         (New-Object System.Text.UTF8Encoding($false)))
+          # kid1 has already used its single minute - in some OTHER minute of the day
+          $day = Get-Date -Format "yyyy-MM-dd"
+          $spent = ((Get-Date).Hour * 60 + (Get-Date).Minute + 500) % 1440
+          $usage = '{"v":2,"days":{"' + $day + '":{"kid1":{"*":[' + $spent + ']}}}}'
+          [System.IO.File]::WriteAllText("C:\ProgramData\KidNest\usage-state.json", $usage,
+                                         (New-Object System.Text.UTF8Encoding($false)))
+          Stop-ScheduledTask -TaskName KidNest; Start-Sleep 2
+          Start-ScheduledTask -TaskName KidNest; Start-Sleep 12
+          Get-Content "C:\ProgramData\KidNest\kidproxy.log" -Tail 6
+
+      - name: kid1 is out of time, kid2 is not
+        shell: pwsh
+        run: |
+          $lines = @('@echo off',
+            'curl.exe -s -o NUL -w "%%{http_code}" --max-time 25 -x http://127.0.0.1:8080 -k https://example.com/')
+          Set-Content C:\probe.cmd $lines -Encoding ASCII
+          icacls C:\probe.cmd /grant "Everyone:(RX)" *>$null
+          icacls C:\Users\Public /grant "Everyone:(OI)(CI)M" *>$null
+          $sec = ConvertTo-SecureString $env:TESTPASS -AsPlainText -Force
+          foreach ($u in "kid1", "kid2") {
+            Set-Content "C:\run-$u.cmd" @("@echo off", "call C:\probe.cmd > C:\Users\Public\$u.txt 2>&1") -Encoding ASCII
+            icacls "C:\run-$u.cmd" /grant "Everyone:(RX)" *>$null
+            $c = New-Object PSCredential($u, $sec)
+            Start-Process cmd.exe -Credential $c -ArgumentList "/c","C:\run-$u.cmd" -LoadUserProfile -Wait
+          }
+          Start-Sleep 3
+          $k1 = (Get-Content C:\Users\Public\kid1.txt -Raw).Trim()
+          $k2 = (Get-Content C:\Users\Public\kid2.txt -Raw).Trim()
+          Write-Host "kid1 (budget spent)     -> $k1   expected 403"
+          Write-Host "kid2 (budget untouched) -> $k2   expected 200"
+          Get-Content "C:\ProgramData\KidNest\kidproxy.log" -Tail 8
+          $fail = @()
+          if ($k1 -ne "403") { $fail += "kid1 was not blocked by the global budget (got $k1)" }
+          if ($k2 -eq "403") { $fail += "kid2 was blocked by kid1's spending (got $k2)" }
+          if ($fail) { $fail | ForEach-Object { Write-Host "FAIL: $_" }; exit 1 }
+          Write-Host "PASS - budgets are per account"
+
+      - name: Clean up
+        if: always()
+        shell: pwsh
+        run: .\payload\reset-clean.ps1
