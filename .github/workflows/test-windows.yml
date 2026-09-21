@@ -1,0 +1,145 @@
+name: Test on real Windows
+
+# Installs KidNest on a clean Windows VM and drives it, so the things that only exist
+# on Windows get exercised before anyone runs this on a family PC: the scheduled task,
+# the addon loading, the data directory, the sheet fetch, and above all the lookup that
+# decides WHICH USER a connection belongs to - the part that decides who gets blocked.
+
+on:
+  workflow_dispatch:
+    inputs:
+      sheet:
+        description: 'Control sheet id or link'
+        required: true
+        default: '1VtlZ1FJlUmRQ3VDx7Gzlve7LZ-oHo79P9iFbNj-9VCs'
+
+env:
+  MITM_VERSION: '12.2.3'
+  KIDUSER: 'kidtest'
+  KIDPASS: 'K1dN3st-Test!2026'
+
+jobs:
+  test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Stage the payload exactly as the installer expects
+        shell: pwsh
+        run: |
+          $url = "https://downloads.mitmproxy.org/$env:MITM_VERSION/mitmproxy-$env:MITM_VERSION-windows-x86_64.zip"
+          Invoke-WebRequest -Uri $url -OutFile mitm.zip -UseBasicParsing
+          Expand-Archive mitm.zip -DestinationPath mitm -Force
+          New-Item -ItemType Directory -Force -Path payload | Out-Null
+          Copy-Item mitm\mitmdump.exe payload\ -Force
+          Copy-Item proxy\install.ps1, proxy\uninstall.ps1, proxy\kidproxy.py, proxy\sheetlog.py, `
+                    proxy\kidproxy.cmd, proxy\diagnose.ps1, proxy\kidnest-pause.ps1, `
+                    setup\reset-clean.ps1, setup\KidNest-Unlock.bat payload\ -Force
+
+      - name: Create a standard user to stand in for the kid
+        shell: pwsh
+        run: |
+          $sec = ConvertTo-SecureString $env:KIDPASS -AsPlainText -Force
+          New-LocalUser -Name $env:KIDUSER -Password $sec -AccountNeverExpires -PasswordNeverExpires | Out-Null
+          Add-LocalGroupMember -Group "Users" -Member $env:KIDUSER
+          # give the account a profile so its registry hive exists
+          $c = New-Object PSCredential($env:KIDUSER, $sec)
+          Start-Process cmd.exe -Credential $c -ArgumentList "/c","echo hi" -LoadUserProfile -Wait -NoNewWindow
+          Write-Host "created $env:KIDUSER"
+
+      - name: Install
+        shell: pwsh
+        run: |
+          .\payload\install.ps1 -SheetId "${{ inputs.sheet }}" -EnforceUsers $env:KIDUSER
+        continue-on-error: true
+
+      - name: The log - does the addon run at all?
+        if: always()
+        shell: pwsh
+        run: |
+          Start-Sleep -Seconds 10
+          $log = "C:\ProgramData\KidNest\kidproxy.log"
+          Write-Host "=============== kidproxy.log ==============="
+          if (Test-Path $log) { Get-Content $log } else { Write-Host "*** NO LOG AT ALL ***" }
+          Write-Host "============================================"
+          Write-Host "mitmdump: $(if (Get-Process mitmdump -EA SilentlyContinue) { 'RUNNING' } else { 'NOT RUNNING' })"
+          Write-Host "listening on 8080: $((Test-NetConnection 127.0.0.1 -Port 8080 -InformationLevel Quiet -WarningAction SilentlyContinue))"
+          Write-Host "--- C:\ProgramData\KidNest ---"
+          Get-ChildItem C:\ProgramData\KidNest -Recurse -EA SilentlyContinue | Select-Object FullName, Length | Format-Table -AutoSize
+
+      - name: Is the administrator left alone?
+        if: always()
+        shell: pwsh
+        run: |
+          # The whole point of per-account routing: this machine's admin must be untouched.
+          $edge = Get-ItemProperty "HKLM:\SOFTWARE\Policies\Microsoft\Edge" -EA SilentlyContinue
+          Write-Host "HKLM Edge ProxyMode   : $($edge.ProxyMode)   (must be empty)"
+          $is = Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Internet Settings" -EA SilentlyContinue
+          Write-Host "HKLM ProxyEnable      : $($is.ProxyEnable)   (must be 0 or empty)"
+          $sid = (New-Object Security.Principal.NTAccount($env:KIDUSER)).Translate([Security.Principal.SecurityIdentifier]).Value
+          New-PSDrive -PSProvider Registry -Name HKU -Root HKEY_USERS -EA SilentlyContinue | Out-Null
+          $loaded = $false
+          if (-not (Test-Path "HKU:\$sid")) { & reg.exe load "HKU\$sid" "C:\Users\$env:KIDUSER\NTUSER.DAT" *>$null; $loaded = $true }
+          $k = Get-ItemProperty "HKU:\$sid\Software\Policies\Microsoft\Edge" -EA SilentlyContinue
+          Write-Host "kid Edge ProxyMode    : $($k.ProxyMode)   (must be fixed_servers)"
+          Write-Host "kid Edge ProxyServer  : $($k.ProxyServer)"
+          if ($loaded) { [gc]::Collect(); & reg.exe unload "HKU\$sid" *>$null }
+
+      - name: Who does the proxy think is connecting?
+        if: always()
+        shell: pwsh
+        run: |
+          # This is the lookup I cannot test anywhere but on Windows. If it returns nothing,
+          # every connection is treated as unknown and fails closed - blocking everybody.
+          Write-Host "--- as the ADMINISTRATOR (expected: passed through, not filtered) ---"
+          & curl.exe -s -o $null -w "  allowed-site  -> %{http_code}`n" --max-time 25 -x http://127.0.0.1:8080 -k https://wayground.com/
+          & curl.exe -s -o $null -w "  blocked-site  -> %{http_code}`n" --max-time 25 -x http://127.0.0.1:8080 -k https://www.minecraft.net/
+
+          Write-Host "--- as the KID (expected: allowed site 200, blocked site 403) ---"
+          $sec = ConvertTo-SecureString $env:KIDPASS -AsPlainText -Force
+          $c = New-Object PSCredential($env:KIDUSER, $sec)
+          $script = "C:\kidtest.cmd"
+          @(
+            'curl.exe -s -o nul -w "  allowed-site  -> %%{http_code}\n" --max-time 25 -x http://127.0.0.1:8080 -k https://wayground.com/  > C:\kidout.txt 2>&1'
+            'curl.exe -s -o nul -w "  blocked-site  -> %%{http_code}\n" --max-time 25 -x http://127.0.0.1:8080 -k https://www.minecraft.net/ >> C:\kidout.txt 2>&1'
+          ) | Set-Content $script -Encoding ASCII
+          icacls C:\ /grant "${env:KIDUSER}:(OI)(CI)M" *>$null
+          Start-Process cmd.exe -Credential $c -ArgumentList "/c", $script -LoadUserProfile -Wait -NoNewWindow -EA SilentlyContinue
+          if (Test-Path C:\kidout.txt) { Get-Content C:\kidout.txt } else { Write-Host "  (could not run as the kid account)" }
+
+      - name: The log again - what did it decide, and for whom?
+        if: always()
+        shell: pwsh
+        run: |
+          $log = "C:\ProgramData\KidNest\kidproxy.log"
+          Write-Host "=============== kidproxy.log ==============="
+          if (Test-Path $log) { Get-Content $log } else { Write-Host "*** STILL NO LOG ***" }
+          Write-Host "============================================"
+          Write-Host "The name in brackets on each BLOCK line is the user lookup result."
+          Write-Host "'(None)' there means the lookup failed and everyone gets blocked."
+
+      - name: diagnose.ps1
+        if: always()
+        shell: pwsh
+        run: |
+          .\payload\diagnose.ps1
+          $f = Join-Path ([Environment]::GetFolderPath("Desktop")) "kidnest-diagnose.txt"
+          if (Test-Path $f) { Get-Content $f }
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-test-evidence
+          path: |
+            C:\ProgramData\KidNest\kidproxy.log
+            C:\Users\runneradmin\Desktop\kidnest-diagnose.txt
+          if-no-files-found: warn
+
+      - name: Uninstall and confirm the machine is clean
+        if: always()
+        shell: pwsh
+        run: |
+          .\payload\reset-clean.ps1
+          Write-Host "tasks left : $((Get-ScheduledTask -TaskName KidNest -EA SilentlyContinue) -ne $null)"
+          Write-Host "folder left: $(Test-Path 'C:\Program Files\KidNest')"
+          Write-Host "data left  : $(Test-Path 'C:\ProgramData\KidNest')"
