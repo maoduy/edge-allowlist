@@ -89,23 +89,33 @@ jobs:
         if: always()
         shell: pwsh
         run: |
-          # This is the lookup I cannot test anywhere but on Windows. If it returns nothing,
+          # The lookup that cannot be tested anywhere but on Windows. If it returns nothing,
           # every connection is treated as unknown and fails closed - blocking everybody.
-          Write-Host "--- as the ADMINISTRATOR (expected: passed through, not filtered) ---"
-          & curl.exe -s -o $null -w "  allowed-site  -> %{http_code}`n" --max-time 25 -x http://127.0.0.1:8080 -k https://wayground.com/
-          & curl.exe -s -o $null -w "  blocked-site  -> %{http_code}`n" --max-time 25 -x http://127.0.0.1:8080 -k https://www.minecraft.net/
+          $probe = @'
+@echo off
+curl.exe -s -o NUL -w "  wayground.com (listed)    -> %%{http_code}\n" --max-time 25 -x http://127.0.0.1:8080 -k https://wayground.com/
+curl.exe -s -o NUL -w "  minecraft.net (unlisted)  -> %%{http_code}\n" --max-time 25 -x http://127.0.0.1:8080 -k https://www.minecraft.net/
+'@
+          Set-Content C:\probe.cmd $probe -Encoding ASCII
+          icacls C:\probe.cmd /grant "${env:KIDUSER}:(RX)" *>$null
 
-          Write-Host "--- as the KID (expected: allowed site 200, blocked site 403) ---"
+          Write-Host "--- as the ADMINISTRATOR (not in enforceUsers: expect both to pass) ---"
+          & cmd.exe /c C:\probe.cmd
+
+          Write-Host "--- as $env:KIDUSER (enforced: expect 200 then 403) ---"
           $sec = ConvertTo-SecureString $env:KIDPASS -AsPlainText -Force
           $c = New-Object PSCredential($env:KIDUSER, $sec)
-          $script = "C:\kidtest.cmd"
-          @(
-            'curl.exe -s -o nul -w "  allowed-site  -> %%{http_code}\n" --max-time 25 -x http://127.0.0.1:8080 -k https://wayground.com/  > C:\kidout.txt 2>&1'
-            'curl.exe -s -o nul -w "  blocked-site  -> %%{http_code}\n" --max-time 25 -x http://127.0.0.1:8080 -k https://www.minecraft.net/ >> C:\kidout.txt 2>&1'
-          ) | Set-Content $script -Encoding ASCII
-          icacls C:\ /grant "${env:KIDUSER}:(OI)(CI)M" *>$null
-          Start-Process cmd.exe -Credential $c -ArgumentList "/c", $script -LoadUserProfile -Wait -NoNewWindow -EA SilentlyContinue
-          if (Test-Path C:\kidout.txt) { Get-Content C:\kidout.txt } else { Write-Host "  (could not run as the kid account)" }
+          $out = "C:\Users\Public\kidout.txt"
+          Remove-Item $out -Force -EA SilentlyContinue
+          Set-Content C:\kidrun.cmd "call C:\probe.cmd > $out 2>&1" -Encoding ASCII
+          icacls C:\kidrun.cmd /grant "${env:KIDUSER}:(RX)" *>$null
+          icacls C:\Users\Public /grant "${env:KIDUSER}:(OI)(CI)M" *>$null
+          try {
+            Start-Process cmd.exe -Credential $c -ArgumentList "/c","C:\kidrun.cmd" -LoadUserProfile -Wait -EA Stop
+          } catch { Write-Host "  could not start as $env:KIDUSER : $($_.Exception.Message)" }
+          Start-Sleep -Seconds 3
+          if ((Test-Path $out) -and (Get-Item $out).Length -gt 0) { Get-Content $out }
+          else { Write-Host "  *** no output captured from $env:KIDUSER ***" }
 
       - name: The log again - what did it decide, and for whom?
         if: always()
