@@ -334,8 +334,10 @@ jobs:
       - name: kid1 is out of time, kid2 is not
         shell: pwsh
         run: |
+          # Sec-Fetch-Dest matters: only browser traffic is metered, by design, so a bare
+          # curl is never counted against a budget and would never be blocked by one.
           $lines = @('@echo off',
-            'curl.exe -s -o NUL -w "%%{http_code}" --max-time 25 -x http://127.0.0.1:8080 -k https://example.com/')
+            'curl.exe -s -o NUL -w "%%{http_code}" --max-time 25 -H "Sec-Fetch-Dest: document" -x http://127.0.0.1:8080 -k https://example.com/')
           Set-Content C:\probe.cmd $lines -Encoding ASCII
           icacls C:\probe.cmd /grant "Everyone:(RX)" *>$null
           icacls C:\Users\Public /grant "Everyone:(OI)(CI)M" *>$null
