@@ -274,12 +274,17 @@ def _save_id_cache():
 
 
 def resolve_handle(handle):
-    """@handle -> UC... channel id via YouTube's own URL resolver (cached on disk)."""
+    """@handle -> UC... channel id via YouTube's own URL resolver (cached on disk).
+
+    Some handles (seen with @codeorg) come back as a bare urlEndpoint pointing at
+    "youtube.com/<legacy-name>" instead of a browseEndpoint - the resolver knows the
+    handle exists but does not hand back its id directly. Falling back to fetching the
+    channel page itself and reading its externalId covers those."""
     h = handle.lower()
     if h in _id_cache: return _id_cache[h]
     if time.time() - _id_fail.get(h, 0) < _ID_FAIL_TTL: return None   # don't retry a dud every refresh
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     try:
-        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
         body = json.dumps({"context": {"client": {"clientName": "WEB", "clientVersion": "2.20240101.00.00"}},
                            "url": f"https://www.youtube.com/@{handle}"}).encode()
         req = urllib.request.Request("https://www.youtube.com/youtubei/v1/navigation/resolve_url?prettyPrint=false",
@@ -289,9 +294,21 @@ def resolve_handle(handle):
         if cid and cid.startswith("UC"):
             _id_cache[h] = cid
             return cid
-        log(f"resolve @{handle}: no channel id in response")
     except Exception as e:
         log(f"resolve @{handle} failed: {e}")
+        _id_fail[h] = time.time()
+        return None
+    try:
+        req = urllib.request.Request(f"https://www.youtube.com/@{handle}", headers={"User-Agent": "Mozilla/5.0"})
+        with opener.open(req, timeout=8) as r:
+            html = r.read().decode("utf-8", "replace")
+        m = re.search(r'"externalId":"(UC[\w-]+)"', html)
+        if m:
+            _id_cache[h] = m.group(1)
+            return m.group(1)
+        log(f"resolve @{handle}: no channel id in response or page")
+    except Exception as e:
+        log(f"resolve @{handle} page fallback failed: {e}")
     _id_fail[h] = time.time()
     return None
 
