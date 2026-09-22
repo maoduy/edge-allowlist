@@ -16,6 +16,21 @@ $Dir  = "C:\Program Files\KidNest"
 $Data = "C:\ProgramData\KidNest"
 $log  = "$Data\watchdog.log"
 
+function Reap($Port) {
+  # Keep whichever process actually owns the listening socket - asking Windows beats
+  # guessing by start time, which picked the wrong one and killed the live server.
+  $all = @(Get-Process mitmdump -ErrorAction SilentlyContinue)
+  if ($all.Count -le 1) { return }
+  $owner = (Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue |
+            Select-Object -First 1).OwningProcess
+  if (-not $owner) { return }                       # nothing is serving; leave it to recovery
+  $extra = @($all | Where-Object { $_.Id -ne $owner })
+  if ($extra.Count) {
+    Note "  $($all.Count) instances, port held by pid $owner - removing $($extra.Count)"
+    $extra | Stop-Process -Force -ErrorAction SilentlyContinue
+  }
+}
+
 function Note($m) {
   try {
     if ((Test-Path $log) -and (Get-Item $log).Length -gt 1MB) {
@@ -53,11 +68,7 @@ if ($healthy) {
   # Healthy, but more than one instance means something restarted it twice. The oldest
   # bound the port and is the one serving; newer ones are wedged or idle. Leave the
   # server alone, clear the rest.
-  $all = @(Get-Process mitmdump -ErrorAction SilentlyContinue | Sort-Object StartTime)
-  if ($all.Count -gt 1) {
-    Note "healthy, but $($all.Count) mitmdump processes - removing $($all.Count - 1) duplicate(s)"
-    $all[1..($all.Count - 1)] | Stop-Process -Force -ErrorAction SilentlyContinue
-  }
+  Reap $Port
   return
 }
 
@@ -87,13 +98,8 @@ for ($i = 0; $i -lt 20; $i++) {
 Note $(if ($ok) { "  recovered after $((($i + 1) * 2)) seconds" }
         else     { "  STILL DOWN after restart - see kidproxy.log" })
 
-# One more sweep: if anything else restarted it at the same moment, keep the instance
-# that bound the port and drop the rest.
-$all = @(Get-Process mitmdump -ErrorAction SilentlyContinue | Sort-Object StartTime)
-if ($all.Count -gt 1) {
-  Note "  $($all.Count) instances after restart - removing $($all.Count - 1)"
-  $all[1..($all.Count - 1)] | Stop-Process -Force -ErrorAction SilentlyContinue
-}
+# One more sweep: something else may have restarted it at the same moment.
+Reap $Port
 
 } finally {
   try { $mutex.ReleaseMutex() } catch { }
