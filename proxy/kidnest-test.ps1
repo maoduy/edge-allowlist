@@ -53,6 +53,9 @@ function Probe($url, $useProxy = $true, $browserLike = $true) {
     $cmd = Join-Path $script:Share "probe.cmd"
     Remove-Item $res -Force -EA SilentlyContinue
     $quoted = ($a | ForEach-Object { if ($_ -match '[\s"]') { '"' + $_ + '"' } else { $_ } }) -join " "
+    # cmd eats a single % - "%{http_code}" becomes nothing and curl writes no code at
+    # all, which read as 000 for every probe and looked exactly like a dead proxy.
+    $quoted = $quoted -replace '%', '%%'
     Set-Content $cmd -Encoding ASCII -Value @("@echo off", "curl.exe $quoted > `"$res`" 2>&1")
     & icacls $cmd /grant "*S-1-1-0:(RX)" *>$null
     try {
