@@ -69,8 +69,11 @@ try { $held = $mutex.WaitOne(0) } catch [System.Threading.AbandonedMutexExceptio
 if (-not $held) { Note "another supervisor already has the lock - exiting"; exit 0 }
 
 $exe = "$Dir\mitmdump.exe"
-$arg = @("--listen-host", "127.0.0.1", "--listen-port", "$Port",
-         "--set", "confdir=$Data\ca", "-s", "$Dir\kidproxy.py", "-q")
+# ONE pre-quoted string, not an array. Start-Process joins an array with spaces and
+# quotes nothing, so "C:\Program Files\KidNest\kidproxy.py" arrived as two separate
+# arguments and mitmdump could never start.
+$arg = "--listen-host 127.0.0.1 --listen-port $Port " +
+       "--set confdir=`"$Data\ca`" -s `"$Dir\kidproxy.py`" -q"
 $child = $null
 $fails = 0
 Note "supervisor up (port $Port, poll ${PollSeconds}s)"
@@ -105,7 +108,9 @@ try {
 
     Note "starting mitmdump"
     try {
-      $child = Start-Process -FilePath $exe -ArgumentList $arg -PassThru -WindowStyle Hidden -ErrorAction Stop
+      $so = "$Data\mitmdump-out.log"; $se = "$Data\mitmdump-err.log"
+      $child = Start-Process -FilePath $exe -ArgumentList $arg -PassThru -WindowStyle Hidden `
+                 -RedirectStandardOutput $so -RedirectStandardError $se -ErrorAction Stop
     } catch {
       $fails++
       Note "  could not launch: $($_.Exception.Message) (attempt $fails)"
@@ -133,7 +138,12 @@ try {
         Note "  still not answering after ${MaxStartSeconds}s - stopping it (attempt $fails)"
         try { $child.Kill() } catch { }
       } else {
-        Note "  start failed (attempt $fails)"
+        Note "  start failed (attempt $fails), exit code $($child.ExitCode)"
+        foreach ($f in $se, $so) {
+          if ((Test-Path $f) -and (Get-Item $f).Length) {
+            Get-Content $f -Tail 5 | ForEach-Object { Note "    $_" }
+          }
+        }
       }
       if ($fails -ge $FailOpenAfter) { break }
       $back = [math]::Min(300, 15 * $fails)
