@@ -72,16 +72,6 @@ $Proxy = "127.0.0.1:$Port"
 New-Item -ItemType Directory -Force -Path $Dir, "$Data\ca" | Out-Null
 
 # 1. mitmproxy binary
-# Defender classifies mitmdump as a hacktool and quarantines it - from the installer's
-# own temp folder and again after it is copied into Program Files. The symptom is
-# baffling: the copy succeeds, then seconds later "the system cannot find the file
-# specified". Exclude both paths first. This is the folder an administrator is
-# deliberately installing into, and KidNest cannot work without the binary surviving.
-foreach ($ex in $Dir, $PSScriptRoot) {
-  try { Add-MpPreference -ExclusionPath $ex -ErrorAction Stop }
-  catch { Write-Host "Could not add a Defender exclusion for $ex - $($_.Exception.Message)" }
-}
-
 $bundled = Join-Path $PSScriptRoot "mitmdump.exe"
 if ((-not (Test-Path "$Dir\mitmdump.exe")) -and (Test-Path $bundled)) {
   Copy-Item $bundled $Dir -Force                      # shipped inside KidNest Setup.exe
@@ -107,8 +97,14 @@ if (-not (Test-Path "$Dir\mitmdump.exe")) {
   if ($det) {
     Write-Host "Windows Defender removed it:" -ForegroundColor Red
     $det | ForEach-Object { Write-Host "   $($_.InitialDetectionTime)  $($_.Resources)" }
-    Write-Host "Allow it in Windows Security > Virus & threat protection > Protection history,"
-    Write-Host "or add an exclusion for $Dir, then run this again."
+    Write-Host ""
+    Write-Host "To allow it, in Windows Security:"
+    Write-Host "  1. Virus & threat protection > Protection history"
+    Write-Host "  2. find the mitmdump detection, Actions > Restore"
+    Write-Host "  3. Manage settings > Exclusions > add $Dir"
+    Write-Host "  4. run this installer again"
+    Write-Host ""
+    Write-Host "KidNest will not touch your antivirus settings itself."
   } else {
     Write-Host "No Defender detection is recorded - check antivirus or disk permissions on $Dir."
   }
