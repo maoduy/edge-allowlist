@@ -170,6 +170,23 @@ def log_repeating(key, msg):
     log(emit)
 
 
+def _log_flush_now():
+    """Write whatever is buffered right now.
+
+    The buffer is what keeps a block storm off the event loop, but it also means
+    the last couple of seconds vanish if the process is killed - precisely the
+    seconds worth reading after a crash. Call this on the way out."""
+    try:
+        with _log_buf_lock:
+            if not _log_buf:
+                return
+            lines, _log_buf[:] = list(_log_buf), []
+        with open(_log_path(), "a", encoding="utf-8") as f:
+            f.write("\n".join(lines) + "\n")
+    except Exception:
+        pass
+
+
 def _log_flusher():
     while True:
         time.sleep(2)
@@ -1264,6 +1281,10 @@ class KidProxy:
             threading.Thread(target=_usage_saver, daemon=True).start()
         _start_url_log()
         log(f"started; enforceUsers={CFG['enforceUsers'] or 'all non-admins'} exempt={CFG['exemptUsers']}")
+        _log_flush_now()          # the start-up lines must survive an early kill
+
+    def done(self):
+        _log_flush_now()
 
     def http_connect(self, flow: http.HTTPFlow):
         host = flow.request.host
