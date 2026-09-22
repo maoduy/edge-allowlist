@@ -199,7 +199,14 @@ $wdt2 = New-ScheduledTaskTrigger -AtStartup
 $wdSet = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes 3) -StartWhenAvailable `
   -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew
 Register-ScheduledTask -TaskName "KidNest Watchdog" -Action $wd -Trigger $wdt,$wdt2 -Settings $wdSet -Principal $principal -Force | Out-Null
-Start-ScheduledTask -TaskName "KidNest"
+# Registering a task that carries an AtLogOn trigger starts it immediately when someone
+# is already logged on. Starting it again here then produced a SECOND instance one second
+# later - the 6MB process stuck beside the 155MB one serving the port, which is exactly
+# what was found on the real machine. Only start it if nothing came up by itself.
+Start-Sleep -Seconds 3
+if (-not (Get-Process mitmdump -ErrorAction SilentlyContinue)) {
+  Start-ScheduledTask -TaskName "KidNest"
+}
 
 # 4. did it ACTUALLY start? The CA file is not proof - an upgrade carries the old one
 # over, so it exists whether or not the proxy ever ran. The log and the process are.
@@ -212,6 +219,17 @@ for ($i = 0; $i -lt 30; $i++) {
 }
 if ($up) {
   Write-Host "Proxy is running."
+  # Belt and braces: if anything did race us into a second instance, keep only the one
+  # Windows says owns the port.
+  $owner = (Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue |
+            Select-Object -First 1).OwningProcess
+  if ($owner) {
+    $dupes = @(Get-Process mitmdump -ErrorAction SilentlyContinue | Where-Object { $_.Id -ne $owner })
+    if ($dupes.Count) {
+      Write-Host "Removing $($dupes.Count) duplicate mitmdump process(es); port is held by pid $owner"
+      $dupes | Stop-Process -Force -ErrorAction SilentlyContinue
+    }
+  }
 } else {
   Write-Host ""
   Write-Host "*** KidNest did NOT start. Diagnosing... ***" -ForegroundColor Yellow
