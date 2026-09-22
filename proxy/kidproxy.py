@@ -1142,7 +1142,7 @@ def enforced(flow_or_ctx):
     return conn_info(flow_or_ctx)[1]
 
 # ---------------------------------------------------------------- YouTube filtering
-BLOCK_HTML = """<!doctype html><html lang="vi"><meta charset="utf-8"><title>Bị chặn</title>
+BLOCK_HTML = """<!doctype html><!--kidnest-block--><html lang="vi"><meta charset="utf-8"><title>Bị chặn</title>
 <body style="margin:0;font-family:system-ui,sans-serif;background:#f4f5f7;display:flex;align-items:center;justify-content:center;height:100vh">
 <div style="background:#fff;padding:40px 48px;border-radius:12px;box-shadow:0 4px 24px rgba(0,0,0,.08);max-width:560px;text-align:center">
 <h1 style="font-size:22px;margin:0 0 12px">{title}</h1><p style="color:#555">{sub}</p></div></body></html>"""
@@ -1310,13 +1310,13 @@ class KidProxy:
                 if nav:
                     flow.response = blocked_page("Trang này không nằm trong danh sách được phép", host)
                 else:
-                    flow.response = http.Response.make(403, b"blocked by kidproxy")
+                    flow.response = http.Response.make(403, b"kidnest-block: site not on the list")
                 log_repeating("blk|%s|%s" % (host, user),
                               f"BLOCK site {host} dest={dest or '-'} "
                               f"ref={_hdr_host(flow.request.headers.get('referer',''))} ({user})")
         elif CFG["blockShorts"] and (path.startswith("/shorts") or path.startswith("/youtubei/v1/reel/")):
             blocked = True
-            flow.response = blocked_page("YouTube Shorts đã bị tắt", "") if path.startswith("/shorts") else http.Response.make(403, b"shorts blocked")
+            flow.response = blocked_page("YouTube Shorts đã bị tắt", "") if path.startswith("/shorts") else http.Response.make(403, b"kidnest-block: shorts")
         if not blocked:
             blocked = self._meter(flow, nav, user)
         # a /watch page is only really "allowed" once the channel check in response() passes
@@ -1355,7 +1355,7 @@ class KidProxy:
                     flow.response = blocked_page(
                         title, "Đã dùng %d/%d phút. Mai được dùng tiếp." % (used, cap))
                 else:
-                    flow.response = http.Response.make(403, b"kidnest: daily time limit reached")
+                    flow.response = http.Response.make(403, b"kidnest-block: daily time limit reached")
                 log(f"LIMIT {target} {used}/{cap}m ({who})")
                 return True
             u.note(day, who, target, minute, nav, threshold)

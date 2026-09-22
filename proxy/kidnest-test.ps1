@@ -39,7 +39,12 @@ if ($AsUser) {
 }
 
 function Probe($url, $useProxy = $true, $browserLike = $true) {
-  $a = @("-s", "-o", "NUL", "-w", "%{http_code} %{time_total}", "--max-time", "20")
+  # Keep the body: a listed site can answer 403 by itself (sourceforge and justinguitar
+  # both refuse a bare curl). Only OUR refusal carries the kidnest-block marker, and
+  # confusing the two makes this tool cry wolf.
+  $body = if ($script:Cred) { Join-Path $script:Share "body.txt" } else { Join-Path $env:TEMP "kn-body.txt" }
+  Remove-Item $body -Force -EA SilentlyContinue
+  $a = @("-s", "-o", $body, "-w", "%{http_code} %{time_total}", "--max-time", "20")
   if ($useProxy) { $a += @("-x", "http://127.0.0.1:$Port") }
   if ($browserLike) { $a += @("-H", "Sec-Fetch-Dest: document", "-H", "Sec-Fetch-Mode: navigate") }
   $a += @("-k", $url)
@@ -73,9 +78,13 @@ function Probe($url, $useProxy = $true, $browserLike = $true) {
     }
     $out = if (Test-Path $res) { (Get-Content $res -Raw) } else { "000 0" }
   }
+  $blocked = $false
+  if (Test-Path $body) {
+    try { $blocked = (Get-Content $body -Raw -EA Stop) -match "kidnest-block" } catch { }
+  }
   $p = "$out".Trim() -split "\s+"
-  if ($p.Count -lt 2 -or $p[0] -notmatch '^\d{3}$') { return @{ Code = "000"; Ms = 0 } }
-  return @{ Code = $p[0]; Ms = [int]([double]($p[1]) * 1000) }
+  if ($p.Count -lt 2 -or $p[0] -notmatch '^\d{3}$') { return @{ Code = "000"; Ms = 0; Blocked = $blocked } }
+  return @{ Code = $p[0]; Ms = [int]([double]($p[1]) * 1000); Blocked = $blocked }
 }
 
 function NoProxyText($url) {
@@ -236,17 +245,21 @@ while ((Get-Date) -lt $end) {
   if ($roll -lt 45) {
     $d = $pickAllowed | Get-Random
     $r = Probe "https://$d/" $true $browserLike
-    $ok = ($r.Code -match '^[23]')
-    [void]$results.Add(@{ Kind = "listed"; Target = $d; Expect = "allow"; Code = $r.Code; Ms = $r.Ms; Ok = $ok })
+    $ok = -not $r.Blocked          # the site's own 403 is not KidNest's doing
+    [void]$results.Add(@{ Kind = "listed"; Target = $d; Expect = "not blocked by us"
+                          Code = $(if($r.Blocked){"KidNest 403"}else{$r.Code}); Ms = $r.Ms; Ok = $ok })
   } elseif ($roll -lt 75) {
     $d = $unlisted | Get-Random
     $r = Probe "https://$d/" $true $browserLike
-    $ok = if ($amEnforced) { $r.Code -eq "403" } else { $r.Code -match '^[23]' }
-    [void]$results.Add(@{ Kind = "unlisted"; Target = $d; Expect = $(if($amEnforced){"403"}else{"allow"}); Code = $r.Code; Ms = $r.Ms; Ok = $ok })
+    $ok = if ($amEnforced) { $r.Blocked } else { -not $r.Blocked }
+    [void]$results.Add(@{ Kind = "unlisted"; Target = $d
+                          Expect = $(if($amEnforced){"blocked by us"}else{"not blocked"})
+                          Code = $(if($r.Blocked){"KidNest 403"}else{$r.Code}); Ms = $r.Ms; Ok = $ok })
   } elseif ($roll -lt 90) {
     $r = Probe "https://www.youtube.com/" $true $browserLike
-    $ok = ($r.Code -match '^[23]')
-    [void]$results.Add(@{ Kind = "youtube"; Target = "youtube.com"; Expect = "allow"; Code = $r.Code; Ms = $r.Ms; Ok = $ok })
+    $ok = -not $r.Blocked
+    [void]$results.Add(@{ Kind = "youtube"; Target = "youtube.com"; Expect = "not blocked by us"
+                          Code = $(if($r.Blocked){"KidNest 403"}else{$r.Code}); Ms = $r.Ms; Ok = $ok })
   } else {
     $r = Probe "http://kidnest.local/" $true $false
     $ok = ($r.Code -eq "200")
