@@ -422,15 +422,19 @@ jobs:
           if ($wlog -notmatch "recovered") { throw "FAIL: watchdog did not report a recovery" }
           Write-Host "PASS - watchdog detected a dead proxy and restored it unattended"
 
-      - name: A healthy proxy must be left alone
+      - name: Exactly one proxy, and a healthy one is left alone
         shell: pwsh
         run: |
-          $before = (Get-Process mitmdump).Id
+          $n = @(Get-Process mitmdump -EA SilentlyContinue).Count
+          Write-Host "mitmdump processes after recovery: $n"
+          if ($n -ne 1) { throw "FAIL: expected exactly 1 mitmdump, found $n" }
+
+          $before = @(Get-Process mitmdump).Id -join ","
           & "C:\Program Files\KidNest\kidnest-watchdog.ps1" -Port 8080
-          $after = (Get-Process mitmdump).Id
-          Write-Host "pid before $before / after $after"
+          $after = @(Get-Process mitmdump).Id -join ","
+          Write-Host "pid before [$before] / after [$after]"
           if ($before -ne $after) { throw "FAIL: watchdog restarted a proxy that was fine" }
-          Write-Host "PASS - no needless restart"
+          Write-Host "PASS - one instance, and no needless restart"
 
       - name: Clean up
         if: always()

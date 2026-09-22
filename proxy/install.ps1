@@ -151,7 +151,11 @@ $action = New-ScheduledTaskAction -Execute $exe -Argument $arg
 $trigger = New-ScheduledTaskTrigger -AtStartup
 try { $trigger.Delay = "PT15S" } catch {}          # let the network come up first
 $trigger2 = New-ScheduledTaskTrigger -AtLogOn      # belt and braces if AtStartup is missed
-$settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 99 -RestartInterval (New-TimeSpan -Minutes 1) `
+# No RestartCount/RestartInterval: Task Scheduler's own restart-on-failure raced the
+# watchdog's restart and left TWO mitmdump processes alive - one holding the port, one
+# wedged. Reproduced in CI. The watchdog is the single owner of recovery now, and it
+# health-checks before acting instead of restarting blind.
+$settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) `
   -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -MultipleInstances IgnoreNew
 $principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
 Register-ScheduledTask -TaskName "KidNest" -Action $action -Trigger $trigger,$trigger2 -Settings $settings -Principal $principal -Force | Out-Null

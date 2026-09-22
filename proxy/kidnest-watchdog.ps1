@@ -38,7 +38,17 @@ try {
   if ($out -match '^\d{3}$' -and $out -ne "000") { $healthy = $true }
 } catch { $healthy = $false }
 
-if ($healthy) { exit 0 }
+if ($healthy) {
+  # Healthy, but more than one instance means something restarted it twice. The oldest
+  # bound the port and is the one serving; newer ones are wedged or idle. Leave the
+  # server alone, clear the rest.
+  $all = @(Get-Process mitmdump -ErrorAction SilentlyContinue | Sort-Object StartTime)
+  if ($all.Count -gt 1) {
+    Note "healthy, but $($all.Count) mitmdump processes - removing $($all.Count - 1) duplicate(s)"
+    $all[1..($all.Count - 1)] | Stop-Process -Force -ErrorAction SilentlyContinue
+  }
+  exit 0
+}
 
 Note "proxy not answering on $Port - recovering"
 $procs = @(Get-Process mitmdump -ErrorAction SilentlyContinue)
