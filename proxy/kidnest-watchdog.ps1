@@ -1,0 +1,67 @@
+<#
+KidNest watchdog - runs as SYSTEM every 5 minutes.
+
+The old watchdog just called "schtasks /Run /TN KidNest". That is a no-op precisely
+when it matters: a mitmdump that is alive but STUCK still counts as Running, so
+Task Scheduler ignores the request and nothing recovers. A household sat without
+internet for 30+ minutes with the watchdog firing happily every 5 of them.
+
+This one proves the proxy actually serves a request before deciding it is healthy.
+A TCP connect is not enough - the kernel accepts into the backlog even when the
+process behind it is wedged, which is exactly the state that caused the outage.
+#>
+param([int]$Port = 8080)
+
+$Dir  = "C:\Program Files\KidNest"
+$Data = "C:\ProgramData\KidNest"
+$log  = "$Data\watchdog.log"
+
+function Note($m) {
+  try {
+    if ((Test-Path $log) -and (Get-Item $log).Length -gt 1MB) {
+      Move-Item $log "$log.1" -Force -ErrorAction SilentlyContinue
+    }
+    "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') $m" | Add-Content $log -ErrorAction SilentlyContinue
+  } catch { }
+}
+
+# Paused on purpose? Then stay out of the way - kidnest-pause.ps1 disables the task.
+$task = Get-ScheduledTask -TaskName "KidNest" -ErrorAction SilentlyContinue
+if (-not $task) { exit 0 }
+if ($task.State -eq "Disabled") { exit 0 }
+
+# End-to-end probe: this only answers if the addon's own request hook ran.
+$healthy = $false
+try {
+  $out = & curl.exe -s -o NUL -w "%{http_code}" --max-time 10 `
+           -x "http://127.0.0.1:$Port" "http://kidnest.local/" 2>$null
+  if ($out -match '^\d{3}$' -and $out -ne "000") { $healthy = $true }
+} catch { $healthy = $false }
+
+if ($healthy) { exit 0 }
+
+Note "proxy not answering on $Port - recovering"
+$procs = @(Get-Process mitmdump -ErrorAction SilentlyContinue)
+Note "  mitmdump processes before: $($procs.Count)"
+
+# Stop the task, then kill every instance ourselves. Stop-ScheduledTask does not
+# reliably terminate the process it launched, and a stray second instance holding
+# the port is the thing that wedges a fresh start.
+Stop-ScheduledTask -TaskName "KidNest" -ErrorAction SilentlyContinue
+Start-Sleep -Seconds 2
+Get-Process mitmdump -ErrorAction SilentlyContinue |
+  Stop-Process -Force -ErrorAction SilentlyContinue
+Start-Sleep -Seconds 2
+
+Start-ScheduledTask -TaskName "KidNest" -ErrorAction SilentlyContinue
+
+# Say whether it actually came back, so the log is evidence and not a guess.
+$ok = $false
+for ($i = 0; $i -lt 20; $i++) {
+  Start-Sleep -Seconds 2
+  $out = & curl.exe -s -o NUL -w "%{http_code}" --max-time 5 `
+           -x "http://127.0.0.1:$Port" "http://kidnest.local/" 2>$null
+  if ($out -match '^\d{3}$' -and $out -ne "000") { $ok = $true; break }
+}
+Note $(if ($ok) { "  recovered after $((($i + 1) * 2)) seconds" }
+        else     { "  STILL DOWN after restart - see kidproxy.log" })

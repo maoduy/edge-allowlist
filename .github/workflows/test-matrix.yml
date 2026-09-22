@@ -364,3 +364,75 @@ jobs:
         if: always()
         shell: pwsh
         run: .\payload\reset-clean.ps1
+
+  watchdog:
+    name: watchdog recovers a dead proxy
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Stage payload
+        shell: pwsh
+        run: |
+          $url = "https://downloads.mitmproxy.org/$env:MITM_VERSION/mitmproxy-$env:MITM_VERSION-windows-x86_64.zip"
+          Invoke-WebRequest -Uri $url -OutFile mitm.zip -UseBasicParsing
+          Expand-Archive mitm.zip -DestinationPath mitm -Force
+          New-Item -ItemType Directory -Force -Path payload | Out-Null
+          Copy-Item mitm\mitmdump.exe payload\ -Force
+          Copy-Item proxy\install.ps1, proxy\uninstall.ps1, proxy\kidproxy.py, proxy\sheetlog.py, `
+                    proxy\kidproxy.cmd, proxy\diagnose.ps1, proxy\kidnest-pause.ps1, `
+                    proxy\kidnest-watchdog.ps1, setup\reset-clean.ps1, `
+                    setup\KidNest-Unlock.bat payload\ -Force
+          $sec = ConvertTo-SecureString $env:TESTPASS -AsPlainText -Force
+          New-LocalUser -Name $env:KIDUSER -Password $sec -AccountNeverExpires -PasswordNeverExpires | Out-Null
+          $c = New-Object PSCredential($env:KIDUSER, $sec)
+          Start-Process cmd.exe -Credential $c -ArgumentList "/c","echo ." -LoadUserProfile -Wait -NoNewWindow
+
+      - name: Install
+        shell: powershell
+        run: .\payload\install.ps1 -SheetId "${{ inputs.sheet }}" -EnforceUsers $env:KIDUSER
+
+      - name: Kill the proxy, then let the watchdog find and fix it
+        shell: pwsh
+        run: |
+          function Probe {
+            $c = & curl.exe -s -o NUL -w "%{http_code}" --max-time 8 `
+                   -x "http://127.0.0.1:8080" "http://kidnest.local/" 2>$null
+            if ($c -match '^\d{3}$' -and $c -ne "000") { return $c } else { return "down" }
+          }
+          Write-Host "before      : $(Probe)"
+          if ((Probe) -eq "down") { throw "proxy was not healthy before the test even began" }
+
+          # A crashed or wedged proxy - the state that left the household offline for
+          # 30 minutes while the old watchdog fired happily every 5 of them.
+          Stop-Process -Name mitmdump -Force
+          Start-Sleep -Seconds 3
+          $dead = Probe
+          Write-Host "after kill  : $dead"
+          if ($dead -ne "down") { throw "proxy still answering after being killed" }
+
+          & "C:\Program Files\KidNest\kidnest-watchdog.ps1" -Port 8080
+          $after = Probe
+          Write-Host "after wd    : $after"
+          Write-Host "--- watchdog.log ---"
+          Get-Content "C:\ProgramData\KidNest\watchdog.log" -EA SilentlyContinue
+
+          if ($after -eq "down") { throw "FAIL: watchdog did not bring the proxy back" }
+          $wlog = Get-Content "C:\ProgramData\KidNest\watchdog.log" -Raw -EA SilentlyContinue
+          if ($wlog -notmatch "recovered") { throw "FAIL: watchdog did not report a recovery" }
+          Write-Host "PASS - watchdog detected a dead proxy and restored it unattended"
+
+      - name: A healthy proxy must be left alone
+        shell: pwsh
+        run: |
+          $before = (Get-Process mitmdump).Id
+          & "C:\Program Files\KidNest\kidnest-watchdog.ps1" -Port 8080
+          $after = (Get-Process mitmdump).Id
+          Write-Host "pid before $before / after $after"
+          if ($before -ne $after) { throw "FAIL: watchdog restarted a proxy that was fine" }
+          Write-Host "PASS - no needless restart"
+
+      - name: Clean up
+        if: always()
+        shell: pwsh
+        run: .\payload\reset-clean.ps1

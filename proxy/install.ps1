@@ -98,7 +98,7 @@ $reset = Join-Path $PSScriptRoot "reset-clean.ps1"
 if (Test-Path $reset) { Copy-Item $reset $Dir -Force }        # doubles as the uninstaller
 $unlock = Join-Path $PSScriptRoot "KidNest-Unlock.bat"        # for when the proxy dies
 if (Test-Path $unlock) { Copy-Item $unlock $Dir -Force }
-foreach ($extra in "kidnest-pause.ps1", "diagnose.ps1") {
+foreach ($extra in "kidnest-pause.ps1", "diagnose.ps1", "kidnest-watchdog.ps1") {
   $src = Join-Path $PSScriptRoot $extra
   if (Test-Path $src) { Copy-Item $src $Dir -Force }
 }
@@ -155,7 +155,12 @@ $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) 
   -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -MultipleInstances IgnoreNew
 $principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
 Register-ScheduledTask -TaskName "KidNest" -Action $action -Trigger $trigger,$trigger2 -Settings $settings -Principal $principal -Force | Out-Null
-$wd = New-ScheduledTaskAction -Execute "schtasks.exe" -Argument "/Run /TN KidNest"
+# NOT "schtasks /Run /TN KidNest": Task Scheduler reports a wedged mitmdump as Running,
+# so IgnoreNew swallowed that request exactly when recovery was needed. The watchdog now
+# proves the proxy serves a request, and force-restarts it - killing every instance - when
+# it does not.
+$wd = New-ScheduledTaskAction -Execute "powershell.exe" `
+  -Argument "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$Dir\kidnest-watchdog.ps1`" -Port $Port"
 # A -Once trigger whose start time is in the past does NOT resume after a reboot, so the
 # watchdog stopped running the moment the PC was restarted. Repeat off a daily trigger and
 # fire at startup as well.
@@ -163,7 +168,7 @@ $wdt = New-ScheduledTaskTrigger -Daily -At (Get-Date).Date.AddMinutes(1)
 $wdt.Repetition = (New-ScheduledTaskTrigger -Once -At (Get-Date) `
   -RepetitionInterval (New-TimeSpan -Minutes 5) -RepetitionDuration (New-TimeSpan -Days 1)).Repetition
 $wdt2 = New-ScheduledTaskTrigger -AtStartup
-$wdSet = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes 1) -StartWhenAvailable `
+$wdSet = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes 3) -StartWhenAvailable `
   -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew
 Register-ScheduledTask -TaskName "KidNest Watchdog" -Action $wd -Trigger $wdt,$wdt2 -Settings $wdSet -Principal $principal -Force | Out-Null
 Start-ScheduledTask -TaskName "KidNest"
