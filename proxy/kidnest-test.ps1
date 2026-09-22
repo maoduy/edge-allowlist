@@ -30,6 +30,7 @@ function Add-Line($t) { [void]$lines.Add($t); Write-Host $t }
 function Sect($t) { Add-Line ""; Add-Line "===== $t =====" }
 
 $script:Cred = $null
+$script:ProbeErr = $null
 $script:Share = "C:\Users\Public\kidnest-test"
 if ($AsUser) {
   $script:Cred = New-Object PSCredential($AsUser, (ConvertTo-SecureString $Password -AsPlainText -Force))
@@ -55,9 +56,18 @@ function Probe($url, $useProxy = $true, $browserLike = $true) {
     Set-Content $cmd -Encoding ASCII -Value @("@echo off", "curl.exe $quoted > `"$res`" 2>&1")
     & icacls $cmd /grant "*S-1-1-0:(RX)" *>$null
     try {
+      # No -WindowStyle and no -WorkingDirectory: combined with -Credential those make
+      # Start-Process fail outright, and the failure was being swallowed, so every probe
+      # came back 000 and the report looked like a dead proxy.
       Start-Process cmd.exe -Credential $script:Cred -ArgumentList "/c", $cmd `
-        -WorkingDirectory $script:Share -Wait -WindowStyle Hidden -EA Stop
-    } catch { }
+        -LoadUserProfile -Wait -EA Stop
+    } catch {
+      if (-not $script:ProbeErr) {
+        $script:ProbeErr = $_.Exception.Message
+        Add-Line "!! cannot run probes as '$AsUser': $($script:ProbeErr)"
+        Add-Line "   every result below would be meaningless - fix this first."
+      }
+    }
     $out = if (Test-Path $res) { (Get-Content $res -Raw) } else { "000 0" }
   }
   $p = "$out".Trim() -split "\s+"
@@ -283,7 +293,8 @@ $problems = @()
 if ($down)        { $problems += "proxy was not answering in $down of $($health.Count) samples" }
 if ($dupes)       { $problems += "more than one mitmdump seen in $dupes samples" }
 if ($restarts)    { $problems += "proxy restarted $restarts time(s) during the soak" }
-if ($bad.Count -gt [math]::Max(2, $total * 0.05)) { $problems += "$($bad.Count)/$total requests did not match the rules" }
+if ($script:ProbeErr) { $problems += "could not run probes as '$AsUser' ($script:ProbeErr) - results are not valid" }
+elseif ($bad.Count -gt [math]::Max(2, $total * 0.05)) { $problems += "$($bad.Count)/$total requests did not match the rules" }
 if ($problems.Count) {
   Add-Line "VERDICT: PROBLEMS FOUND"
   $problems | ForEach-Object { Add-Line "  - $_" }
