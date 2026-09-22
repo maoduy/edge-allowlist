@@ -206,7 +206,7 @@ jobs:
           New-Item -ItemType Directory -Force -Path payload | Out-Null
           Copy-Item mitm\mitmdump.exe payload\ -Force
           Copy-Item proxy\install.ps1, proxy\uninstall.ps1, proxy\kidproxy.py, proxy\sheetlog.py, `
-                    proxy\kidproxy.cmd, proxy\diagnose.ps1, proxy\kidnest-pause.ps1, `
+                    proxy\kidproxy.cmd, proxy\diagnose.ps1, proxy\kidnest-pause.ps1, proxy\kidnest-supervisor.ps1, `
                     setup\reset-clean.ps1, setup\KidNest-Unlock.bat payload\ -Force
           $sec = ConvertTo-SecureString $env:TESTPASS -AsPlainText -Force
           New-LocalUser -Name $env:KIDUSER -Password $sec -AccountNeverExpires -PasswordNeverExpires | Out-Null
@@ -286,7 +286,7 @@ jobs:
           New-Item -ItemType Directory -Force -Path payload | Out-Null
           Copy-Item mitm\mitmdump.exe payload\ -Force
           Copy-Item proxy\install.ps1, proxy\uninstall.ps1, proxy\kidproxy.py, proxy\sheetlog.py, `
-                    proxy\kidproxy.cmd, proxy\diagnose.ps1, proxy\kidnest-pause.ps1, `
+                    proxy\kidproxy.cmd, proxy\diagnose.ps1, proxy\kidnest-pause.ps1, proxy\kidnest-supervisor.ps1, `
                     setup\reset-clean.ps1, setup\KidNest-Unlock.bat payload\ -Force
           $sec = ConvertTo-SecureString $env:TESTPASS -AsPlainText -Force
           foreach ($u in "kid1", "kid2") {
@@ -380,7 +380,7 @@ jobs:
           New-Item -ItemType Directory -Force -Path payload | Out-Null
           Copy-Item mitm\mitmdump.exe payload\ -Force
           Copy-Item proxy\install.ps1, proxy\uninstall.ps1, proxy\kidproxy.py, proxy\sheetlog.py, `
-                    proxy\kidproxy.cmd, proxy\diagnose.ps1, proxy\kidnest-pause.ps1, `
+                    proxy\kidproxy.cmd, proxy\diagnose.ps1, proxy\kidnest-pause.ps1, proxy\kidnest-supervisor.ps1, `
                     proxy\kidnest-watchdog.ps1, setup\reset-clean.ps1, `
                     setup\KidNest-Unlock.bat payload\ -Force
           $sec = ConvertTo-SecureString $env:TESTPASS -AsPlainText -Force
@@ -455,7 +455,7 @@ jobs:
           New-Item -ItemType Directory -Force -Path payload | Out-Null
           Copy-Item mitm\mitmdump.exe payload\ -Force
           Copy-Item proxy\install.ps1, proxy\uninstall.ps1, proxy\kidproxy.py, proxy\sheetlog.py, `
-                    proxy\kidproxy.cmd, proxy\diagnose.ps1, proxy\kidnest-pause.ps1, `
+                    proxy\kidproxy.cmd, proxy\diagnose.ps1, proxy\kidnest-pause.ps1, proxy\kidnest-supervisor.ps1, `
                     proxy\kidnest-watchdog.ps1, proxy\kidnest-test.ps1, `
                     setup\reset-clean.ps1, setup\KidNest-Unlock.bat payload\ -Force
           $sec = ConvertTo-SecureString $env:TESTPASS -AsPlainText -Force

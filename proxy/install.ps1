@@ -171,6 +171,9 @@ if ($LogSheetId) {
 # 3. scheduled tasks (SYSTEM, at boot, no time limit, restart on failure) + watchdog
 $exe = "$Dir\mitmdump.exe"
 $arg = "--listen-host 127.0.0.1 --listen-port $Port --set confdir=`"$Data\ca`" -s `"$Dir\kidproxy.py`" -q"
+if (-not (Test-Path "$Dir\kidnest-supervisor.ps1")) {
+  throw "kidnest-supervisor.ps1 was not installed to $Dir - refusing to register a task that points at nothing."
+}
 # The task runs the SUPERVISOR, which owns mitmdump as its child. Nothing else may
 # start the proxy - that is what produced two instances racing for the port.
 $action = New-ScheduledTaskAction -Execute "powershell.exe" `
