@@ -101,6 +101,64 @@ function KillTree($root) {
   foreach ($p in @((TreeOf $root $map).Keys)) { Stop-Process -Id $p -Force -ErrorAction SilentlyContinue }
 }
 
+# ---------------------------------------------------------------- kill-on-close job
+# Tearing the proxy down in a finally block only works when we are asked politely.
+# Task Scheduler stopping the task terminates this process outright, finally never
+# runs, and mitmdump is orphaned - an unowned proxy that the next start then has to
+# fight. A job object with KILL_ON_JOB_CLOSE moves that guarantee into the kernel:
+# whenever this process dies, for any reason, Windows kills everything in the job
+# with it. No cooperation required.
+$JobCode = @'
+using System;
+using System.Runtime.InteropServices;
+public static class KidJob {
+  [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+  static extern IntPtr CreateJobObjectW(IntPtr a, string name);
+  [DllImport("kernel32.dll")]
+  static extern bool SetInformationJobObject(IntPtr job, int cls, IntPtr info, uint len);
+  [DllImport("kernel32.dll")]
+  static extern bool AssignProcessToJobObject(IntPtr job, IntPtr proc);
+
+  [StructLayout(LayoutKind.Sequential)]
+  struct BASIC {
+    public long PerProcessUserTimeLimit, PerJobUserTimeLimit;
+    public uint LimitFlags;
+    public UIntPtr MinWorkingSet, MaxWorkingSet;
+    public uint ActiveProcessLimit;
+    public UIntPtr Affinity;
+    public uint PriorityClass, SchedulingClass;
+  }
+  [StructLayout(LayoutKind.Sequential)]
+  struct EXTENDED {
+    public BASIC Basic;
+    public ulong ReadOps, WriteOps, OtherOps, ReadBytes, WriteBytes, OtherBytes;
+    public UIntPtr ProcessMemoryLimit, JobMemoryLimit, PeakProcessMemory, PeakJobMemory;
+  }
+
+  public static IntPtr Create() {
+    IntPtr job = CreateJobObjectW(IntPtr.Zero, null);
+    if (job == IntPtr.Zero) return IntPtr.Zero;
+    EXTENDED e = new EXTENDED();
+    e.Basic.LimitFlags = 0x2000;              // JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+    int len = Marshal.SizeOf(typeof(EXTENDED));
+    IntPtr p = Marshal.AllocHGlobal(len);
+    try {
+      Marshal.StructureToPtr(e, p, false);
+      if (!SetInformationJobObject(job, 9, p, (uint)len)) return IntPtr.Zero;
+    } finally { Marshal.FreeHGlobal(p); }
+    return job;
+  }
+  public static bool Add(IntPtr job, IntPtr proc) {
+    return job != IntPtr.Zero && AssignProcessToJobObject(job, proc);
+  }
+}
+'@
+$Job = [IntPtr]::Zero
+try {
+  Add-Type -TypeDefinition $JobCode -Language CSharp -ErrorAction Stop
+  $Job = [KidJob]::Create()
+} catch { }
+
 $mutex = New-Object System.Threading.Mutex($false, "Global\KidNestSupervisor")
 $held = $false
 try { $held = $mutex.WaitOne(0) } catch [System.Threading.AbandonedMutexException] { $held = $true }
@@ -114,7 +172,7 @@ $arg = "--listen-host 127.0.0.1 --listen-port $Port " +
        "--set confdir=`"$Data\ca`" -s `"$Dir\kidproxy.py`" -q"
 $child = $null
 $fails = 0
-Note "supervisor up (port $Port, poll ${PollSeconds}s)"
+Note "supervisor up (port $Port, poll ${PollSeconds}s)$(if ($Job -eq [IntPtr]::Zero) { ', no job object' } else { '' })"
 
 try {
   while ($true) {
@@ -149,6 +207,12 @@ try {
       $so = "$Data\mitmdump-out.log"; $se = "$Data\mitmdump-err.log"
       $child = Start-Process -FilePath $exe -ArgumentList $arg -PassThru -WindowStyle Hidden `
                  -RedirectStandardOutput $so -RedirectStandardError $se -ErrorAction Stop
+      # The server mitmdump re-executes inherits the job, so the whole tree is covered.
+      # Its own try: a job-object problem must not be reported as a failed launch and
+      # send a perfectly good proxy round the retry loop.
+      try {
+        if (-not [KidJob]::Add($Job, $child.Handle)) { Note "  (job object refused - relying on tree teardown)" }
+      } catch { Note "  (job object unavailable - relying on tree teardown)" }
     } catch {
       $fails++
       Note "  could not launch: $($_.Exception.Message) (attempt $fails)"
