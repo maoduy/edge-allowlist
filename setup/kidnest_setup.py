@@ -387,7 +387,11 @@ class Setup(tk.Tk):
             if "install.ps1" in missing:
                 raise RuntimeError("Thiếu tệp cài đặt trong gói.")
             if missing:
-                self.say("(không kèm: %s - sẽ tải khi cần)" % ", ".join(missing))
+                self.say("(không kèm: %s)" % ", ".join(missing))
+                if "mitmdump.exe" in missing:
+                    self.say("CẢNH BÁO: mitmdump.exe có trong gói cài nhưng đã biến mất khi giải nén.")
+                    self.say("Gần như chắc chắn Windows Defender đã cách ly nó.")
+                    self.say("Trình cài đặt sẽ thêm ngoại lệ cho Defender rồi tải lại.")
             cmd = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script,
                    "-SheetId", sid, "-EnforceUsers", ",".join(chosen)]
             self.say("> install.ps1 -SheetId %s -EnforceUsers %s" % (sid, ",".join(chosen)))

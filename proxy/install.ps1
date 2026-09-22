@@ -72,6 +72,16 @@ $Proxy = "127.0.0.1:$Port"
 New-Item -ItemType Directory -Force -Path $Dir, "$Data\ca" | Out-Null
 
 # 1. mitmproxy binary
+# Defender classifies mitmdump as a hacktool and quarantines it - from the installer's
+# own temp folder and again after it is copied into Program Files. The symptom is
+# baffling: the copy succeeds, then seconds later "the system cannot find the file
+# specified". Exclude both paths first. This is the folder an administrator is
+# deliberately installing into, and KidNest cannot work without the binary surviving.
+foreach ($ex in $Dir, $PSScriptRoot) {
+  try { Add-MpPreference -ExclusionPath $ex -ErrorAction Stop }
+  catch { Write-Host "Could not add a Defender exclusion for $ex - $($_.Exception.Message)" }
+}
+
 $bundled = Join-Path $PSScriptRoot "mitmdump.exe"
 if ((-not (Test-Path "$Dir\mitmdump.exe")) -and (Test-Path $bundled)) {
   Copy-Item $bundled $Dir -Force                      # shipped inside KidNest Setup.exe
@@ -87,6 +97,24 @@ if (-not (Test-Path "$Dir\mitmdump.exe")) {
   Copy-Item (Join-Path $ex "mitmdump.exe") $Dir -Force
   Remove-Item $zip, $ex -Recurse -Force -ErrorAction SilentlyContinue
 }
+
+if (-not (Test-Path "$Dir\mitmdump.exe")) {
+  Write-Host ""
+  Write-Host "*** mitmdump.exe is not there after installing it. ***" -ForegroundColor Red
+  $det = @(Get-MpThreatDetection -ErrorAction SilentlyContinue |
+           Where-Object { "$($_.Resources)" -match "mitmdump|KidNest" } |
+           Sort-Object InitialDetectionTime -Descending | Select-Object -First 5)
+  if ($det) {
+    Write-Host "Windows Defender removed it:" -ForegroundColor Red
+    $det | ForEach-Object { Write-Host "   $($_.InitialDetectionTime)  $($_.Resources)" }
+    Write-Host "Allow it in Windows Security > Virus & threat protection > Protection history,"
+    Write-Host "or add an exclusion for $Dir, then run this again."
+  } else {
+    Write-Host "No Defender detection is recorded - check antivirus or disk permissions on $Dir."
+  }
+  throw "mitmdump.exe missing - stopping before anything is pointed at a proxy that cannot run."
+}
+Write-Host "mitmproxy ready: $((Get-Item "$Dir\mitmdump.exe").Length) bytes"
 
 # 2. addon + config (stop a running instance first so the new code is picked up)
 Stop-ScheduledTask -TaskName "KidNest" -ErrorAction SilentlyContinue
@@ -191,10 +219,19 @@ if ($up) {
 } else {
   Write-Host ""
   Write-Host "*** KidNest did NOT start. Diagnosing... ***" -ForegroundColor Yellow
-  $info = Get-ScheduledTask -TaskName "KidNest" -EA SilentlyContinue | Get-ScheduledTaskInfo
-  if ($info) {
-    Write-Host ("  task result = 0x{0:X}   last run = {1}" -f $info.LastTaskResult, $info.LastRunTime)
-  } else { Write-Host "  the KidNest task is not registered" }
+  $tk = Get-ScheduledTask -TaskName "KidNest" -EA SilentlyContinue
+  if (-not $tk) {
+    Write-Host "  the KidNest task is not registered"
+  } else {
+    $info = $tk | Get-ScheduledTaskInfo -EA SilentlyContinue
+    if ($info) {
+      Write-Host ("  task registered, state = {0}, result = 0x{1:X}, last run = {2}" -f `
+                  $tk.State, $info.LastTaskResult, $info.LastRunTime)
+    } else {
+      Write-Host "  task registered (state $($tk.State)) but its run history could not be read"
+    }
+  }
+  Write-Host "  mitmdump.exe present: $(Test-Path "$Dir\mitmdump.exe")"
   Write-Host "  mitmdump process: $(if (Get-Process mitmdump -EA SilentlyContinue) { 'running' } else { 'not running' })"
   Write-Host "  log file        : $(if (Test-Path $logFile) { 'written' } else { 'never written' })"
   Write-Host "  starting it by hand to capture the real error..."

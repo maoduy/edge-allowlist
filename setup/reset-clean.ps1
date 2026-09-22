@@ -217,6 +217,16 @@ foreach ($p in $killPaths) {
   } else { Note "path: $p" "not present" }
 }
 
+# ---------------------------------------------------------------- 5a. Defender exclusion
+# The installer excludes its folder so Defender stops quarantining mitmdump. Undo that.
+foreach ($ex in "C:\Program Files\KidNest", "C:\Program Files\KidProxy") {
+  $cur = @((Get-MpPreference -EA SilentlyContinue).ExclusionPath)
+  if ($cur -contains $ex) {
+    if (-not $DryRun) { Remove-MpPreference -ExclusionPath $ex -EA SilentlyContinue }
+    Note "defender exclusion: $ex" "removed"
+  }
+}
+
 # ---------------------------------------------------------------- 5b. WinHTTP proxy
 # Separate from the per-user proxy above; Windows services and some apps use this one.
 $winhttp = (& netsh winhttp show proxy) -join " "
