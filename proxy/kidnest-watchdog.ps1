@@ -25,10 +25,21 @@ function Note($m) {
   } catch { }
 }
 
+# Only one watchdog may act at a time. The scheduled run fires every 5 minutes and can
+# land inside the window where something else - a manual run, an installer, a person -
+# is already restarting the proxy. Both then "recover" it and you get two mitmdump
+# processes, one of which wedges the port. Reproduced in CI; this is the cure.
+$mutex = New-Object System.Threading.Mutex($false, "Global\KidNestWatchdog")
+$held = $false
+try { $held = $mutex.WaitOne(5000) } catch [System.Threading.AbandonedMutexException] { $held = $true }
+if (-not $held) { exit 0 }
+
+try {
+
 # Paused on purpose? Then stay out of the way - kidnest-pause.ps1 disables the task.
 $task = Get-ScheduledTask -TaskName "KidNest" -ErrorAction SilentlyContinue
-if (-not $task) { exit 0 }
-if ($task.State -eq "Disabled") { exit 0 }
+if (-not $task) { return }
+if ($task.State -eq "Disabled") { return }
 
 # End-to-end probe: this only answers if the addon's own request hook ran.
 $healthy = $false
@@ -47,7 +58,7 @@ if ($healthy) {
     Note "healthy, but $($all.Count) mitmdump processes - removing $($all.Count - 1) duplicate(s)"
     $all[1..($all.Count - 1)] | Stop-Process -Force -ErrorAction SilentlyContinue
   }
-  exit 0
+  return
 }
 
 Note "proxy not answering on $Port - recovering"
@@ -75,3 +86,16 @@ for ($i = 0; $i -lt 20; $i++) {
 }
 Note $(if ($ok) { "  recovered after $((($i + 1) * 2)) seconds" }
         else     { "  STILL DOWN after restart - see kidproxy.log" })
+
+# One more sweep: if anything else restarted it at the same moment, keep the instance
+# that bound the port and drop the rest.
+$all = @(Get-Process mitmdump -ErrorAction SilentlyContinue | Sort-Object StartTime)
+if ($all.Count -gt 1) {
+  Note "  $($all.Count) instances after restart - removing $($all.Count - 1)"
+  $all[1..($all.Count - 1)] | Stop-Process -Force -ErrorAction SilentlyContinue
+}
+
+} finally {
+  try { $mutex.ReleaseMutex() } catch { }
+  $mutex.Dispose()
+}
