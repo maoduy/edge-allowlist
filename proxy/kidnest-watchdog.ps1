@@ -1,35 +1,23 @@
 <#
 KidNest watchdog - runs as SYSTEM every 5 minutes.
 
-The old watchdog just called "schtasks /Run /TN KidNest". That is a no-op precisely
-when it matters: a mitmdump that is alive but STUCK still counts as Running, so
-Task Scheduler ignores the request and nothing recovers. A household sat without
-internet for 30+ minutes with the watchdog firing happily every 5 of them.
+Its only job now is to make sure the SUPERVISOR is running. The supervisor owns
+mitmdump: it starts it, waits until it really answers, sweeps strays, and takes it
+down with itself. Nothing else may touch the proxy.
 
-This one proves the proxy actually serves a request before deciding it is healthy.
-A TCP connect is not enough - the kernel accepts into the backlog even when the
-process behind it is wedged, which is exactly the state that caused the outage.
+That division matters. This script used to restart mitmdump itself, racing the
+installer and Task Scheduler doing the same - which is what left two processes
+fighting over port 8080, one of them wedged at 6MB. A watchdog that only asks "is the
+one owner alive?" cannot cause that.
+
+It also used to fire "schtasks /Run /TN KidNest" blind, which Task Scheduler ignores
+when it believes the task is already running - so it did nothing in exactly the
+situation it existed for.
 #>
 param([int]$Port = 8080)
 
-$Dir  = "C:\Program Files\KidNest"
 $Data = "C:\ProgramData\KidNest"
 $log  = "$Data\watchdog.log"
-
-function Reap($Port) {
-  # Keep whichever process actually owns the listening socket - asking Windows beats
-  # guessing by start time, which picked the wrong one and killed the live server.
-  $all = @(Get-Process mitmdump -ErrorAction SilentlyContinue)
-  if ($all.Count -le 1) { return }
-  $owner = (Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue |
-            Select-Object -First 1).OwningProcess
-  if (-not $owner) { return }                       # nothing is serving; leave it to recovery
-  $extra = @($all | Where-Object { $_.Id -ne $owner })
-  if ($extra.Count) {
-    Note "  $($all.Count) instances, port held by pid $owner - removing $($extra.Count)"
-    $extra | Stop-Process -Force -ErrorAction SilentlyContinue
-  }
-}
 
 function Note($m) {
   try {
@@ -40,78 +28,26 @@ function Note($m) {
   } catch { }
 }
 
-# Only one watchdog may act at a time. The scheduled run fires every 5 minutes and can
-# land inside the window where something else - a manual run, an installer, a person -
-# is already restarting the proxy. Both then "recover" it and you get two mitmdump
-# processes, one of which wedges the port. Reproduced in CI; this is the cure.
-$mutex = New-Object System.Threading.Mutex($false, "Global\KidNestWatchdog")
-$held = $false
-try { $held = $mutex.WaitOne(5000) } catch [System.Threading.AbandonedMutexException] { $held = $true }
-if (-not $held) { exit 0 }
-
-try {
-
-# Paused on purpose? Then stay out of the way - kidnest-pause.ps1 disables the task.
 $task = Get-ScheduledTask -TaskName "KidNest" -ErrorAction SilentlyContinue
-if (-not $task) { return }
-if ($task.State -eq "Disabled") { return }
+if (-not $task) { Note "the KidNest task is not registered"; exit 0 }
 
-# End-to-end probe: this only answers if the addon's own request hook ran.
-$healthy = $false
-try {
-  $out = & curl.exe -s -o NUL -w "%{http_code}" --max-time 10 `
-           -x "http://127.0.0.1:$Port" "http://kidnest.local/" 2>$null
-  if ($out -match '^\d{3}$' -and $out -ne "000") { $healthy = $true }
-} catch { $healthy = $false }
+# Paused on purpose, or stood down after repeated failures? Leave it alone - a person
+# decides when it comes back, with "kidnest resume".
+if ($task.State -eq "Disabled") { exit 0 }
 
-# A proxy that started moments ago is not a dead one. Without this the watchdog can
-# fire during the first seconds of a normal start, decide nothing is answering yet,
-# and "recover" it - producing the second instance it is supposed to prevent.
-$young = @(Get-Process mitmdump -ErrorAction SilentlyContinue |
-           Where-Object { $_.StartTime -gt (Get-Date).AddSeconds(-90) })
-if (-not $healthy -and $young.Count) {
-  Note "not answering yet, but an instance is only $([int]((Get-Date) - ($young | Sort-Object StartTime -Descending | Select-Object -First 1).StartTime).TotalSeconds)s old - leaving it to finish starting"
-  return
-}
+# Supervisor alive: whether the proxy is healthy is its business, and it checks every
+# 30 seconds. Stepping in here is what caused duplicates.
+if ($task.State -eq "Running") { exit 0 }
 
-if ($healthy) {
-  # Healthy, but more than one instance means something restarted it twice. The oldest
-  # bound the port and is the one serving; newer ones are wedged or idle. Leave the
-  # server alone, clear the rest.
-  Reap $Port
-  return
-}
-
-Note "proxy not answering on $Port - recovering"
-$procs = @(Get-Process mitmdump -ErrorAction SilentlyContinue)
-Note "  mitmdump processes before: $($procs.Count)"
-
-# Stop the task, then kill every instance ourselves. Stop-ScheduledTask does not
-# reliably terminate the process it launched, and a stray second instance holding
-# the port is the thing that wedges a fresh start.
-Stop-ScheduledTask -TaskName "KidNest" -ErrorAction SilentlyContinue
-Start-Sleep -Seconds 2
-Get-Process mitmdump -ErrorAction SilentlyContinue |
-  Stop-Process -Force -ErrorAction SilentlyContinue
-Start-Sleep -Seconds 2
-
+Note "supervisor is not running (task state: $($task.State)) - starting it"
 Start-ScheduledTask -TaskName "KidNest" -ErrorAction SilentlyContinue
 
-# Say whether it actually came back, so the log is evidence and not a guess.
 $ok = $false
-for ($i = 0; $i -lt 20; $i++) {
+for ($i = 0; $i -lt 30; $i++) {
   Start-Sleep -Seconds 2
-  $out = & curl.exe -s -o NUL -w "%{http_code}" --max-time 5 `
-           -x "http://127.0.0.1:$Port" "http://kidnest.local/" 2>$null
-  if ($out -match '^\d{3}$' -and $out -ne "000") { $ok = $true; break }
+  $c = & curl.exe -s -o NUL -w "%{http_code}" --max-time 5 `
+         -x "http://127.0.0.1:$Port" "http://kidnest.local/" 2>$null
+  if ($c -match '^\d{3}$' -and $c -ne "000") { $ok = $true; break }
 }
-Note $(if ($ok) { "  recovered after $((($i + 1) * 2)) seconds" }
-        else     { "  STILL DOWN after restart - see kidproxy.log" })
-
-# One more sweep: something else may have restarted it at the same moment.
-Reap $Port
-
-} finally {
-  try { $mutex.ReleaseMutex() } catch { }
-  $mutex.Dispose()
-}
+Note $(if ($ok) { "  proxy answering again after $((($i + 1) * 2))s" }
+        else     { "  still not answering - see supervisor.log" })

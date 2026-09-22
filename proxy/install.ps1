@@ -122,7 +122,7 @@ $reset = Join-Path $PSScriptRoot "reset-clean.ps1"
 if (Test-Path $reset) { Copy-Item $reset $Dir -Force }        # doubles as the uninstaller
 $unlock = Join-Path $PSScriptRoot "KidNest-Unlock.bat"        # for when the proxy dies
 if (Test-Path $unlock) { Copy-Item $unlock $Dir -Force }
-foreach ($extra in "kidnest-pause.ps1", "diagnose.ps1", "kidnest-watchdog.ps1", "kidnest-test.ps1") {
+foreach ($extra in "kidnest-pause.ps1", "diagnose.ps1", "kidnest-watchdog.ps1", "kidnest-test.ps1", "kidnest-supervisor.ps1") {
   $src = Join-Path $PSScriptRoot $extra
   if (Test-Path $src) { Copy-Item $src $Dir -Force }
 }
@@ -171,7 +171,10 @@ if ($LogSheetId) {
 # 3. scheduled tasks (SYSTEM, at boot, no time limit, restart on failure) + watchdog
 $exe = "$Dir\mitmdump.exe"
 $arg = "--listen-host 127.0.0.1 --listen-port $Port --set confdir=`"$Data\ca`" -s `"$Dir\kidproxy.py`" -q"
-$action = New-ScheduledTaskAction -Execute $exe -Argument $arg
+# The task runs the SUPERVISOR, which owns mitmdump as its child. Nothing else may
+# start the proxy - that is what produced two instances racing for the port.
+$action = New-ScheduledTaskAction -Execute "powershell.exe" `
+  -Argument "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$Dir\kidnest-supervisor.ps1`" -Port $Port"
 $trigger = New-ScheduledTaskTrigger -AtStartup
 try { $trigger.Delay = "PT15S" } catch {}          # let the network come up first
 $trigger2 = New-ScheduledTaskTrigger -AtLogOn      # belt and braces if AtStartup is missed
@@ -199,37 +202,24 @@ $wdt2 = New-ScheduledTaskTrigger -AtStartup
 $wdSet = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes 3) -StartWhenAvailable `
   -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew
 Register-ScheduledTask -TaskName "KidNest Watchdog" -Action $wd -Trigger $wdt,$wdt2 -Settings $wdSet -Principal $principal -Force | Out-Null
-# Registering a task that carries an AtLogOn trigger starts it immediately when someone
-# is already logged on. Starting it again here then produced a SECOND instance one second
-# later - the 6MB process stuck beside the 155MB one serving the port, which is exactly
-# what was found on the real machine. Only start it if nothing came up by itself.
-Start-Sleep -Seconds 3
-if (-not (Get-Process mitmdump -ErrorAction SilentlyContinue)) {
-  Start-ScheduledTask -TaskName "KidNest"
-}
+# The supervisor may already be running from the AtLogOn trigger that registration
+# fires. Asking again is harmless: IgnoreNew keeps it to one, and the supervisor
+# itself decides whether the proxy needs starting.
+Start-ScheduledTask -TaskName "KidNest" -ErrorAction SilentlyContinue
 
 # 4. did it ACTUALLY start? The CA file is not proof - an upgrade carries the old one
 # over, so it exists whether or not the proxy ever ran. The log and the process are.
 $logFile = "$Data\kidproxy.log"
-Remove-Item $logFile -Force -ErrorAction SilentlyContinue
 $up = $false
-for ($i = 0; $i -lt 30; $i++) {
-  Start-Sleep -Seconds 1
-  if ((Get-Process mitmdump -ErrorAction SilentlyContinue) -and (Test-Path $logFile)) { $up = $true; break }
+for ($i = 0; $i -lt 60; $i++) {
+  Start-Sleep -Seconds 2
+  $c = & curl.exe -s -o NUL -w "%{http_code}" --max-time 5 -x "http://127.0.0.1:$Port" "http://kidnest.local/" 2>$null
+  if ($c -match "^\d{3}$" -and $c -ne "000") { $up = $true; break }
 }
 if ($up) {
-  Write-Host "Proxy is running."
-  # Belt and braces: if anything did race us into a second instance, keep only the one
-  # Windows says owns the port.
-  $owner = (Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue |
-            Select-Object -First 1).OwningProcess
-  if ($owner) {
-    $dupes = @(Get-Process mitmdump -ErrorAction SilentlyContinue | Where-Object { $_.Id -ne $owner })
-    if ($dupes.Count) {
-      Write-Host "Removing $($dupes.Count) duplicate mitmdump process(es); port is held by pid $owner"
-      $dupes | Stop-Process -Force -ErrorAction SilentlyContinue
-    }
-  }
+  Write-Host "Proxy is answering (took $($i * 2)s)."
+  $n = @(Get-Process mitmdump -ErrorAction SilentlyContinue).Count
+  Write-Host "mitmdump instances: $n"
 } else {
   Write-Host ""
   Write-Host "*** KidNest did NOT start. Diagnosing... ***" -ForegroundColor Yellow
