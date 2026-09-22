@@ -156,8 +156,21 @@ jobs:
         if: always()
         shell: pwsh
         run: |
+          Write-Host "--- C:\ProgramData\KidNest ---"
+          Get-ChildItem C:\ProgramData\KidNest -Recurse -EA SilentlyContinue |
+            Select-Object FullName, Length, LastWriteTime | Format-Table -AutoSize
+          foreach ($f in "supervisor.log", "mitmdump-err.log", "mitmdump-out.log", "watchdog.log") {
+            $p2 = "C:\ProgramData\KidNest\$f"
+            Write-Host "--- $f ---"
+            if (Test-Path $p2) { Get-Content $p2 -Tail 40 } else { Write-Host "(missing)" }
+          }
+          Write-Host "--- kidproxy.log ---"
           $log = "C:\ProgramData\KidNest\kidproxy.log"
-          if (Test-Path $log) { Get-Content $log } else { Write-Host "*** NO LOG ***" }
+          if (Test-Path $log) { Get-Content $log -Tail 40 } else { Write-Host "*** NO LOG ***" }
+          Write-Host "--- processes ---"
+          Get-Process mitmdump -EA SilentlyContinue |
+            Select-Object Id, @{n="MB";e={[int]($_.WorkingSet64/1MB)}}, StartTime, Path |
+            Format-Table -AutoSize
 
       - name: Uninstall and verify clean
         if: always()
