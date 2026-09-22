@@ -129,10 +129,20 @@ foreach ($n in "KidNest", "KidNest Watchdog") {
 }
 
 Sect "processes and port"
+# mitmdump is a PyInstaller onefile build: one healthy proxy is a bootstrap process
+# PLUS the server it re-executes. Count trees, not processes, or a working proxy looks
+# like a duplicate.
+function ProxyRoots {
+  $map = @{}
+  foreach ($p in Get-CimInstance Win32_Process -Filter "Name='mitmdump.exe'" -EA SilentlyContinue) {
+    $map[[int]$p.ProcessId] = [int]$p.ParentProcessId
+  }
+  return @($map.Keys | Where-Object { -not $map.ContainsKey($map[$_]) })
+}
 function ProcTable {
   $owner = (Get-NetTCPConnection -LocalPort $Port -State Listen -EA SilentlyContinue | Select-Object -First 1).OwningProcess
   $ps = @(Get-Process mitmdump -EA SilentlyContinue)
-  $out = @("mitmdump instances: $($ps.Count)  | port $Port owned by pid: $(if($owner){$owner}else{'NOBODY'})")
+  $out = @("mitmdump proxies: $(@(ProxyRoots).Count) (processes: $($ps.Count))  | port $Port owned by pid: $(if($owner){$owner}else{'NOBODY'})")
   foreach ($p in $ps) {
     $mb = [int]($p.WorkingSet64 / 1MB)
     $mark = if ($owner -and $p.Id -eq $owner) { "<- serving" } else { "" }
@@ -234,7 +244,7 @@ while ((Get-Date) -lt $end) {
     $now = @(Select-String -Path "$Data\kidproxy.log" -Pattern "started;" -EA SilentlyContinue).Count
     if ($now -gt $logLine0) { $restarts += ($now - $logLine0); $logLine0 = $now }
     $h = ("{0}  answering={1,-4} instances={2} portPid={3,-7} mem={4}MB restartsSoFar={5}" -f `
-          (Get-Date -Format "HH:mm:ss"), ($ctl.Code -ne "000"), $ps.Count, $(if($owner){$owner}else{'-'}), $mb, $restarts)
+          (Get-Date -Format "HH:mm:ss"), ($ctl.Code -ne "000"), @(ProxyRoots).Count, $(if($owner){$owner}else{'-'}), $mb, $restarts)
     [void]$health.Add($h); Add-Line "  $h"
     $nextHealth = (Get-Date).AddMinutes(1)
   }
@@ -312,7 +322,7 @@ Sect "VERDICT"
 $problems = @()
 $notes = @()
 if ($down)        { $problems += "proxy was not answering in $down of $($health.Count) samples" }
-if ($dupeAtEnd)   { $problems += "more than one mitmdump still running at the end" }
+if ($dupeAtEnd)   { $problems += "more than one mitmdump proxy still running at the end" }
 elseif ($dupes)   { $notes += "a duplicate appeared in $dupes sample(s) and was cleaned up automatically" }
 if ($restarts)    { $problems += "proxy restarted $restarts time(s) during the soak" }
 if ($script:ProbeErr) { $problems += "could not run probes as '$AsUser' ($script:ProbeErr) - results are not valid" }

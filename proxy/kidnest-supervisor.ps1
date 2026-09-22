@@ -3,10 +3,14 @@ KidNest supervisor - the ONLY thing allowed to start or stop mitmdump.
 
 Before this, three different things could launch the proxy: Task Scheduler (through
 an AtStartup and an AtLogOn trigger on the same task), the installer's explicit
-Start-ScheduledTask, and the watchdog's recovery. They raced. The loser of the race
-for port 8080 never finished starting and sat there wedged - the 6MB process beside
-the 155MB one that was actually serving. Patching each race individually did not
-converge, because the real fault was that nothing owned the process.
+Start-ScheduledTask, and the watchdog's recovery. Nothing owned the process, so
+nothing could say whether what was running was healthy.
+
+The 6MB process sitting beside the 155MB one was never the symptom of that. mitmdump
+is a PyInstaller onefile binary and always runs as a bootstrap plus the server it
+unpacks and re-executes. Every attempt to reap "the duplicate" was killing a working
+proxy. Counting processes is meaningless here; the only honest health check is
+whether the thing answers.
 
 Task Scheduler now runs THIS, and this runs mitmdump as its own child:
 
@@ -54,13 +58,47 @@ function Serving {
   return ($c -match '^\d{3}$' -and $c -ne "000")
 }
 
-function SweepStrays($keep) {
-  $extra = @(Get-Process mitmdump -ErrorAction SilentlyContinue |
-             Where-Object { $_.Id -ne $keep })
-  if ($extra.Count) {
-    Note "sweeping $($extra.Count) stray mitmdump process(es); port held by pid $keep"
-    $extra | Stop-Process -Force -ErrorAction SilentlyContinue
+# mitmdump.exe is a PyInstaller onefile build: it unpacks itself and re-executes, so a
+# single healthy proxy is ALWAYS two processes - a small bootstrap (~6MB) and the real
+# server (~155MB) that holds the port. Start-Process hands back the bootstrap. Treating
+# "two processes" as a duplicate is what made the supervisor kill the server it had just
+# started, every five seconds. One proxy = one process TREE.
+function ProcMap {
+  $m = @{}
+  foreach ($p in Get-CimInstance Win32_Process -Filter "Name='mitmdump.exe'" -ErrorAction SilentlyContinue) {
+    $m[[int]$p.ProcessId] = [int]$p.ParentProcessId
   }
+  return $m
+}
+
+function TreeOf($root, $map) {
+  # the root, everything descended from it, and the ancestors that are also mitmdump
+  $keep = @{}
+  if (-not $root) { return $keep }
+  $keep[[int]$root] = $true
+  $up = [int]$root
+  while ($map.ContainsKey($up) -and $map.ContainsKey($map[$up])) { $up = $map[$up]; $keep[$up] = $true }
+  for ($i = 0; $i -lt 8; $i++) {           # walk down, a few generations is plenty
+    foreach ($pid2 in @($map.Keys)) {
+      if (-not $keep.ContainsKey($pid2) -and $keep.ContainsKey($map[$pid2])) { $keep[$pid2] = $true }
+    }
+  }
+  return $keep
+}
+
+function SweepStrays($keep) {
+  $map  = ProcMap
+  $mine = TreeOf $keep $map
+  $extra = @($map.Keys | Where-Object { -not $mine.ContainsKey($_) })
+  if ($extra.Count) {
+    Note "sweeping $($extra.Count) stray mitmdump process(es) outside the tree of pid $keep"
+    $extra | ForEach-Object { Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue }
+  }
+}
+
+function KillTree($root) {
+  $map = ProcMap
+  foreach ($p in @((TreeOf $root $map).Keys)) { Stop-Process -Id $p -Force -ErrorAction SilentlyContinue }
 }
 
 $mutex = New-Object System.Threading.Mutex($false, "Global\KidNestSupervisor")
@@ -130,13 +168,14 @@ try {
 
     if ($ready) {
       $fails = 0
-      Note "  ready in $([int]((Get-Date) - $t0).TotalSeconds)s, pid $($child.Id)"
-      SweepStrays $child.Id
+      $owner = PortOwner
+      Note "  ready in $([int]((Get-Date) - $t0).TotalSeconds)s, bootstrap pid $($child.Id), serving pid $owner"
+      SweepStrays $owner
     } else {
       $fails++
       if (-not $child.HasExited) {
         Note "  still not answering after ${MaxStartSeconds}s - stopping it (attempt $fails)"
-        try { $child.Kill() } catch { }
+        KillTree $child.Id
       } else {
         Note "  start failed (attempt $fails), exit code $($child.ExitCode)"
         foreach ($f in $se, $so) {
@@ -165,8 +204,8 @@ try {
 } finally {
   # The proxy is our child - do not leave it running without a supervisor.
   if ($child -and -not $child.HasExited) {
-    Note "supervisor stopping - taking mitmdump (pid $($child.Id)) with it"
-    try { $child.Kill() } catch { }
+    Note "supervisor stopping - taking mitmdump (tree of pid $($child.Id)) with it"
+    KillTree $child.Id
   }
   try { $mutex.ReleaseMutex() } catch { }
   $mutex.Dispose()

@@ -428,8 +428,10 @@ jobs:
           Write-Host "--- supervisor.log ---"
           Get-Content "C:\ProgramData\KidNest\supervisor.log" -EA SilentlyContinue
           if ($back -eq "down") { throw "FAIL: supervisor did not restore the proxy" }
-          $n = @(Get-Process mitmdump -EA SilentlyContinue).Count
-          Write-Host "mitmdump instances: $n"
+          $m = @{}; Get-CimInstance Win32_Process -Filter "Name='mitmdump.exe'" -EA SilentlyContinue |
+            ForEach-Object { $m[[int]$_.ProcessId] = [int]$_.ParentProcessId }
+          $n = @($m.Keys | Where-Object { -not $m.ContainsKey($m[$_]) }).Count   # trees, not processes
+          Write-Host "mitmdump proxies: $n (one proxy = bootstrap + server)"
           if ($n -ne 1) { throw "FAIL: expected exactly 1 mitmdump, found $n" }
           Write-Host "PASS - recovered unattended, single instance"
 
@@ -438,7 +440,9 @@ jobs:
         run: |
           Stop-ScheduledTask -TaskName "KidNest"
           Start-Sleep -Seconds 8
-          $n = @(Get-Process mitmdump -EA SilentlyContinue).Count
+          $m = @{}; Get-CimInstance Win32_Process -Filter "Name='mitmdump.exe'" -EA SilentlyContinue |
+            ForEach-Object { $m[[int]$_.ProcessId] = [int]$_.ParentProcessId }
+          $n = @($m.Keys | Where-Object { -not $m.ContainsKey($m[$_]) }).Count   # trees, not processes
           Write-Host "mitmdump after stopping the task: $n"
           if ($n -ne 0) { throw "FAIL: $n orphaned mitmdump left behind" }
           Start-ScheduledTask -TaskName "KidNest"

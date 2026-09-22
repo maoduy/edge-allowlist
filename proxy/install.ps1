@@ -181,10 +181,9 @@ $action = New-ScheduledTaskAction -Execute "powershell.exe" `
 $trigger = New-ScheduledTaskTrigger -AtStartup
 try { $trigger.Delay = "PT15S" } catch {}          # let the network come up first
 $trigger2 = New-ScheduledTaskTrigger -AtLogOn      # belt and braces if AtStartup is missed
-# No RestartCount/RestartInterval: Task Scheduler's own restart-on-failure raced the
-# watchdog's restart and left TWO mitmdump processes alive - one holding the port, one
-# wedged. Reproduced in CI. The watchdog is the single owner of recovery now, and it
-# health-checks before acting instead of restarting blind.
+# No RestartCount/RestartInterval: Task Scheduler restarting the supervisor behind its
+# own back is exactly the kind of second owner this design exists to remove. The
+# supervisor never exits while it is healthy, and recovers itself when it is not.
 $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) `
   -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -MultipleInstances IgnoreNew
 $principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
@@ -221,8 +220,11 @@ for ($i = 0; $i -lt 60; $i++) {
 }
 if ($up) {
   Write-Host "Proxy is answering (took $($i * 2)s)."
-  $n = @(Get-Process mitmdump -ErrorAction SilentlyContinue).Count
-  Write-Host "mitmdump instances: $n"
+  # One healthy proxy = two processes (PyInstaller bootstrap + the server it
+  # re-executes). Report trees so a working proxy does not look like a duplicate.
+  $m = @{}; Get-CimInstance Win32_Process -Filter "Name='mitmdump.exe'" -EA SilentlyContinue |
+    ForEach-Object { $m[[int]$_.ProcessId] = [int]$_.ParentProcessId }
+  Write-Host "mitmdump proxies: $(@($m.Keys | Where-Object { -not $m.ContainsKey($m[$_]) }).Count)"
 } else {
   Write-Host ""
   Write-Host "*** KidNest did NOT start. Diagnosing... ***" -ForegroundColor Yellow
