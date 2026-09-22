@@ -508,7 +508,13 @@ jobs:
                             "health over time", "VERDICT") {
             if ($txt -notmatch [regex]::Escape($need)) { throw "FAIL: report missing section '$need'" }
           }
-          if ($txt -notmatch "HEALTHY") { throw "FAIL: self-test did not reach a healthy verdict" }
+          # "NOT HEALTHY" contains "HEALTHY" - checking for the bare word passed either way
+          if ($txt -match "VERDICT: PROBLEMS FOUND") {
+            Write-Host "self-test reported problems:"
+            ($txt -split "`n" | Select-String -Pattern "^\s+- " ) | ForEach-Object { Write-Host $_ }
+            throw "FAIL: self-test found problems"
+          }
+          if ($txt -notmatch "VERDICT: HEALTHY") { throw "FAIL: self-test reached no verdict" }
           Write-Host "PASS - self-test ran and reported healthy"
 
       - name: Clean up

@@ -29,13 +29,39 @@ $lines = New-Object System.Collections.ArrayList
 function Add-Line($t) { [void]$lines.Add($t); Write-Host $t }
 function Sect($t) { Add-Line ""; Add-Line "===== $t =====" }
 
+$script:Cred = $null
+$script:Share = "C:\Users\Public\kidnest-test"
+if ($AsUser) {
+  $script:Cred = New-Object PSCredential($AsUser, (ConvertTo-SecureString $Password -AsPlainText -Force))
+  New-Item -ItemType Directory -Force -Path $script:Share | Out-Null
+  & icacls $script:Share /grant "*S-1-1-0:(OI)(CI)M" *>$null      # Everyone, so the child can write
+}
+
 function Probe($url, $useProxy = $true, $browserLike = $true) {
   $a = @("-s", "-o", "NUL", "-w", "%{http_code} %{time_total}", "--max-time", "20")
   if ($useProxy) { $a += @("-x", "http://127.0.0.1:$Port") }
   if ($browserLike) { $a += @("-H", "Sec-Fetch-Dest: document", "-H", "Sec-Fetch-Mode: navigate") }
   $a += @("-k", $url)
-  try { $out = & curl.exe @a 2>$null } catch { $out = "000 0" }
+
+  if (-not $script:Cred) {
+    try { $out = & curl.exe @a 2>$null } catch { $out = "000 0" }
+  } else {
+    # Actually run as the child. Judging that account's rules while probing from an
+    # administrator's session reports failures that are not real - and hides real ones.
+    $res = Join-Path $script:Share "probe.txt"
+    $cmd = Join-Path $script:Share "probe.cmd"
+    Remove-Item $res -Force -EA SilentlyContinue
+    $quoted = ($a | ForEach-Object { if ($_ -match '[\s"]') { '"' + $_ + '"' } else { $_ } }) -join " "
+    Set-Content $cmd -Encoding ASCII -Value @("@echo off", "curl.exe $quoted > `"$res`" 2>&1")
+    & icacls $cmd /grant "*S-1-1-0:(RX)" *>$null
+    try {
+      Start-Process cmd.exe -Credential $script:Cred -ArgumentList "/c", $cmd `
+        -WorkingDirectory $script:Share -Wait -WindowStyle Hidden -EA Stop
+    } catch { }
+    $out = if (Test-Path $res) { (Get-Content $res -Raw) } else { "000 0" }
+  }
   $p = "$out".Trim() -split "\s+"
+  if ($p.Count -lt 2 -or $p[0] -notmatch '^\d{3}$') { return @{ Code = "000"; Ms = 0 } }
   return @{ Code = $p[0]; Ms = [int]([double]($p[1]) * 1000) }
 }
 
@@ -160,6 +186,7 @@ $me = ([Security.Principal.WindowsIdentity]::GetCurrent().Name -split '\\')[-1]
 $probeUser = if ($AsUser) { $AsUser } else { $me }
 $amEnforced = $enforced -contains $probeUser
 Add-Line "probing as '$probeUser' - enforced by KidNest: $amEnforced"
+if ($AsUser) { Add-Line "requests really are issued from that account, not this session." }
 if (-not $amEnforced) {
   Add-Line "NOTE: this account is not filtered, so blocked sites are EXPECTED to load."
   Add-Line "      Run with -AsUser <child> -Password <pw> to test what the child sees."
@@ -258,10 +285,10 @@ if ($dupes)       { $problems += "more than one mitmdump seen in $dupes samples"
 if ($restarts)    { $problems += "proxy restarted $restarts time(s) during the soak" }
 if ($bad.Count -gt [math]::Max(2, $total * 0.05)) { $problems += "$($bad.Count)/$total requests did not match the rules" }
 if ($problems.Count) {
-  Add-Line "NOT HEALTHY:"
+  Add-Line "VERDICT: PROBLEMS FOUND"
   $problems | ForEach-Object { Add-Line "  - $_" }
 } else {
-  Add-Line "HEALTHY - $total requests, no restarts, one instance throughout."
+  Add-Line "VERDICT: HEALTHY - $total requests, no restarts, one instance throughout."
 }
 
 $lines | Set-Content -Path $report -Encoding UTF8
