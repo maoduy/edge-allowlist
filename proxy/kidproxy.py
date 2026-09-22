@@ -31,6 +31,7 @@ if _shared is None:
     _shared.usage = None
     _shared.refresher = False
     _shared.urllog = False
+    _shared.update_running = False
     _shared.start_lock = threading.Lock()
     sys.modules["__kidproxy_shared__"] = _shared
 DEFAULTS = {
@@ -669,26 +670,42 @@ def control_response(path, accept=""):
     if p in ("/update", "/refresh"):
         now = time.time()
         waited = now - _last_manual[0]
-        if waited < CONTROL_MIN_INTERVAL:
+        if _shared.update_running:
+            title = "Đang cập nhật..."
+            sub = "Một lần cập nhật khác đang chạy nền. Xem lại sau vài giây."
+        elif waited < CONTROL_MIN_INTERVAL:
             title = "Vừa cập nhật xong"
             sub = "Đợi %d giây rồi bấm lại." % (CONTROL_MIN_INTERVAL - int(waited))
         else:
+            # refresh() can take many seconds (network round trips per YouTube handle,
+            # up to 16s each on a failure). request() runs on mitmproxy's single event
+            # loop - calling refresh() here directly would freeze EVERY connection
+            # through the proxy, for every account, until it returns. That is exactly
+            # what happened: "kidnest update" blocked the whole household's internet.
+            # Run it on its own thread instead, same as the periodic background refresh.
             _last_manual[0] = now
-            with lock:
-                before = set(L.domains)
-            refresh()
-            if _shared.sheet is not None:
+            _shared.update_running = True
+
+            def _bg():
                 try:
-                    _shared.sheet.flush()
-                except Exception as e:
-                    log(f"url log push failed: {e}")
-            with lock:
-                added, err = sorted(L.domains - before), L.last_err
-            if err:
-                title, sub = "Không tải được danh sách", err
-            else:
-                title = "Đã cập nhật danh sách"
-                sub = ("Mới thêm: " + ", ".join(added)) if added else "Không có thay đổi mới."
+                    with lock:
+                        before = set(L.domains)
+                    refresh()
+                    if _shared.sheet is not None:
+                        try:
+                            _shared.sheet.flush()
+                        except Exception as e:
+                            log(f"url log push failed: {e}")
+                    with lock:
+                        added = sorted(L.domains - before)
+                    if added:
+                        log("update: mới thêm " + ", ".join(added))
+                finally:
+                    _shared.update_running = False
+
+            threading.Thread(target=_bg, daemon=True).start()
+            title = "Đang cập nhật ở chế độ nền..."
+            sub = "Không chặn trang nào khác trong lúc này. Mở lại /update hoặc /log sau vài giây để xem kết quả."
     else:
         title, sub = "KidProxy", "/update để tải lại danh sách, /log để xem nhật ký truy cập."
     stats = _control_stats()
