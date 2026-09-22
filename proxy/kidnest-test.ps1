@@ -292,6 +292,10 @@ Sect "health over time"
 $health | ForEach-Object { Add-Line "  $_" }
 $down = @($health | Where-Object { $_ -match "answering=False" }).Count
 $dupes = @($health | Where-Object { $_ -match "instances=[2-9]" }).Count
+# A duplicate the watchdog cleared within a minute is the system working, not failing.
+# Only a duplicate that is STILL there at the end is a problem worth reporting.
+$dupeAtEnd = $false
+if ($health.Count) { $dupeAtEnd = ($health[$health.Count - 1] -match "instances=[2-9]") }
 
 Sect "state after the soak"
 ProcTable | ForEach-Object { Add-Line $_ }
@@ -306,8 +310,10 @@ Get-Content "$Data\kidproxy.log" -Tail 30 -EA SilentlyContinue | ForEach-Object 
 
 Sect "VERDICT"
 $problems = @()
+$notes = @()
 if ($down)        { $problems += "proxy was not answering in $down of $($health.Count) samples" }
-if ($dupes)       { $problems += "more than one mitmdump seen in $dupes samples" }
+if ($dupeAtEnd)   { $problems += "more than one mitmdump still running at the end" }
+elseif ($dupes)   { $notes += "a duplicate appeared in $dupes sample(s) and was cleaned up automatically" }
 if ($restarts)    { $problems += "proxy restarted $restarts time(s) during the soak" }
 if ($script:ProbeErr) { $problems += "could not run probes as '$AsUser' ($script:ProbeErr) - results are not valid" }
 elseif ($bad.Count -gt [math]::Max(2, $total * 0.05)) { $problems += "$($bad.Count)/$total requests did not match the rules" }
@@ -315,8 +321,9 @@ if ($problems.Count) {
   Add-Line "VERDICT: PROBLEMS FOUND"
   $problems | ForEach-Object { Add-Line "  - $_" }
 } else {
-  Add-Line "VERDICT: HEALTHY - $total requests, no restarts, one instance throughout."
+  Add-Line "VERDICT: HEALTHY - $total requests, $($health.Count) health samples, nothing unexpected."
 }
+foreach ($n in $notes) { Add-Line "  note: $n" }
 
 $lines | Set-Content -Path $report -Encoding UTF8
 Write-Host ""

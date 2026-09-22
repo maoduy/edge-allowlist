@@ -64,6 +64,16 @@ try {
   if ($out -match '^\d{3}$' -and $out -ne "000") { $healthy = $true }
 } catch { $healthy = $false }
 
+# A proxy that started moments ago is not a dead one. Without this the watchdog can
+# fire during the first seconds of a normal start, decide nothing is answering yet,
+# and "recover" it - producing the second instance it is supposed to prevent.
+$young = @(Get-Process mitmdump -ErrorAction SilentlyContinue |
+           Where-Object { $_.StartTime -gt (Get-Date).AddSeconds(-90) })
+if (-not $healthy -and $young.Count) {
+  Note "not answering yet, but an instance is only $([int]((Get-Date) - ($young | Sort-Object StartTime -Descending | Select-Object -First 1).StartTime).TotalSeconds)s old - leaving it to finish starting"
+  return
+}
+
 if ($healthy) {
   # Healthy, but more than one instance means something restarted it twice. The oldest
   # bound the port and is the one serving; newer ones are wedged or idle. Leave the
