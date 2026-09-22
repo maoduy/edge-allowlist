@@ -440,3 +440,78 @@ jobs:
         if: always()
         shell: pwsh
         run: .\payload\reset-clean.ps1
+
+  selftest:
+    name: kidnest test, and the log storm stays contained
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Stage payload and a child account
+        shell: pwsh
+        run: |
+          $url = "https://downloads.mitmproxy.org/$env:MITM_VERSION/mitmproxy-$env:MITM_VERSION-windows-x86_64.zip"
+          Invoke-WebRequest -Uri $url -OutFile mitm.zip -UseBasicParsing
+          Expand-Archive mitm.zip -DestinationPath mitm -Force
+          New-Item -ItemType Directory -Force -Path payload | Out-Null
+          Copy-Item mitm\mitmdump.exe payload\ -Force
+          Copy-Item proxy\install.ps1, proxy\uninstall.ps1, proxy\kidproxy.py, proxy\sheetlog.py, `
+                    proxy\kidproxy.cmd, proxy\diagnose.ps1, proxy\kidnest-pause.ps1, `
+                    proxy\kidnest-watchdog.ps1, proxy\kidnest-test.ps1, `
+                    setup\reset-clean.ps1, setup\KidNest-Unlock.bat payload\ -Force
+          $sec = ConvertTo-SecureString $env:TESTPASS -AsPlainText -Force
+          New-LocalUser -Name $env:KIDUSER -Password $sec -AccountNeverExpires -PasswordNeverExpires | Out-Null
+          $c = New-Object PSCredential($env:KIDUSER, $sec)
+          Start-Process cmd.exe -Credential $c -ArgumentList "/c","echo ." -LoadUserProfile -Wait -NoNewWindow
+
+      - name: Install
+        shell: powershell
+        run: .\payload\install.ps1 -SheetId "${{ inputs.sheet }}" -EnforceUsers $env:KIDUSER
+
+      - name: A blocked endpoint hammering in a loop must not flood the log
+        shell: pwsh
+        run: |
+          # This is what Windows telemetry did on the real machine: 4,786 refusals in
+          # six minutes, each one writing two files on the event loop.
+          $log = "C:\ProgramData\KidNest\kidproxy.log"
+          $before = @(Get-Content $log -EA SilentlyContinue).Count
+          $lines = @('@echo off', 'for /L %%i in (1,1,400) do @curl.exe -s -o NUL --max-time 5 -H "Sec-Fetch-Dest: document" -x http://127.0.0.1:8080 -k https://example.com/')
+          Set-Content C:\storm.cmd $lines -Encoding ASCII
+          icacls C:\storm.cmd /grant "Everyone:(RX)" *>$null
+          $sec = ConvertTo-SecureString $env:TESTPASS -AsPlainText -Force
+          $c = New-Object PSCredential($env:KIDUSER, $sec)
+          $sw = [Diagnostics.Stopwatch]::StartNew()
+          Start-Process cmd.exe -Credential $c -ArgumentList "/c","C:\storm.cmd" -LoadUserProfile -Wait
+          $sw.Stop()
+          Start-Sleep -Seconds 5
+          $after = @(Get-Content $log -EA SilentlyContinue).Count
+          $grew = $after - $before
+          Write-Host "400 blocked requests in $([int]$sw.Elapsed.TotalSeconds)s added $grew log lines"
+          if ($grew -gt 60) { throw "FAIL: log grew by $grew lines - repeats are not being collapsed" }
+          $alive = & curl.exe -s -o NUL -w "%{http_code}" --max-time 15 -x http://127.0.0.1:8080 "http://kidnest.local/" 2>$null
+          Write-Host "proxy still answering after the storm: $alive"
+          if ($alive -eq "000") { throw "FAIL: proxy stopped answering under a block storm" }
+          Write-Host "PASS - storm contained, proxy responsive"
+
+      - name: Run kidnest test as the child
+        shell: pwsh
+        run: |
+          & "C:\Program Files\KidNest\kidnest-test.ps1" -Minutes 2 -Port 8080 `
+              -AsUser $env:KIDUSER -Password $env:TESTPASS
+          $rep = Get-ChildItem "$env:USERPROFILE\Desktop\kidnest-test-*.txt" -EA SilentlyContinue |
+                 Sort-Object LastWriteTime | Select-Object -Last 1
+          if (-not $rep) { throw "FAIL: kidnest test wrote no report" }
+          Write-Host "--- report ---"
+          Get-Content $rep.FullName
+          $txt = Get-Content $rep.FullName -Raw
+          foreach ($need in "machine", "tasks", "processes and port", "permissions",
+                            "health over time", "VERDICT") {
+            if ($txt -notmatch [regex]::Escape($need)) { throw "FAIL: report missing section '$need'" }
+          }
+          if ($txt -notmatch "HEALTHY") { throw "FAIL: self-test did not reach a healthy verdict" }
+          Write-Host "PASS - self-test ran and reported healthy"
+
+      - name: Clean up
+        if: always()
+        shell: pwsh
+        run: .\payload\reset-clean.ps1

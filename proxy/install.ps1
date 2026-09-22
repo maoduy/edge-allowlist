@@ -98,7 +98,7 @@ $reset = Join-Path $PSScriptRoot "reset-clean.ps1"
 if (Test-Path $reset) { Copy-Item $reset $Dir -Force }        # doubles as the uninstaller
 $unlock = Join-Path $PSScriptRoot "KidNest-Unlock.bat"        # for when the proxy dies
 if (Test-Path $unlock) { Copy-Item $unlock $Dir -Force }
-foreach ($extra in "kidnest-pause.ps1", "diagnose.ps1", "kidnest-watchdog.ps1") {
+foreach ($extra in "kidnest-pause.ps1", "diagnose.ps1", "kidnest-watchdog.ps1", "kidnest-test.ps1") {
   $src = Join-Path $PSScriptRoot $extra
   if (Test-Path $src) { Copy-Item $src $Dir -Force }
 }
@@ -345,5 +345,6 @@ Write-Host ""
 Write-Host "KidNest installed. Log: $Data\kidproxy.log"
 Write-Host "If the PC ever loses internet: use the desktop shortcut"
 Write-Host "  \"KidNest - Khoi phuc mang\", or run: kidnest unlock"
+Write-Host "To check it is behaving: kidnest test   (10-minute soak + full report)"
 if (Test-Path "$logFile") { Get-Content $logFile -Tail 3 }
 Write-Host "Restart the browser (or the PC). Admin accounts are not filtered; standard users are."

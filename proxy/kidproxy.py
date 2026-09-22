@@ -128,16 +128,60 @@ def _log_path():
     return CFG.get("logFile") or os.path.join(DATA, "kidproxy.log")
 
 
+# Writing to disk from the hooks is what made this unstable. Windows retries a blocked
+# endpoint in a tight loop - activity.windows.com was refused 4,786 times in six minutes,
+# peaking at 1,448 log lines in one minute - and every one of them opened, wrote and
+# closed two files ON MITMPROXY'S SINGLE EVENT-LOOP THREAD. The proxy drowned in its own
+# logging, stopped answering, and the watchdog restarted it, over and over.
+# Hooks now only append to a buffer; one background thread does the I/O.
+_log_buf = []
+_log_buf_lock = threading.Lock()
+_BLOCK_SUPPRESS = 60          # seconds to collapse an identical repeated block into a count
+_block_seen = {}              # key -> [count since last emit, when last emitted]
+
+
 def log(msg):
     line = time.strftime("%Y-%m-%d %H:%M:%S ") + msg
-    if True:                                  # file first: it is the only log a SYSTEM task has
-        try:
-            with open(_log_path(), "a", encoding="utf-8") as f: f.write(line + "\n")
-        except Exception: pass
+    with _log_buf_lock:
+        if len(_log_buf) < 5000:              # a stuck flusher must not eat memory
+            _log_buf.append(line)
     try:
         print("kidproxy:", msg)
     except Exception:
         pass          # no console under Task Scheduler -> stdout is an invalid handle
+
+
+def log_repeating(key, msg):
+    """For things that can arrive hundreds of times a second. Emits the first one, then
+    counts the rest and emits a single summary when the window closes."""
+    now = time.time()
+    with _log_buf_lock:
+        ent = _block_seen.get(key)
+        if ent is None:
+            _block_seen[key] = [0, now]
+            emit = msg
+        elif now - ent[1] >= _BLOCK_SUPPRESS:
+            n = ent[0]
+            _block_seen[key] = [0, now]
+            emit = msg + (" (+%d lần nữa trong %ds qua)" % (n, _BLOCK_SUPPRESS) if n else "")
+        else:
+            ent[0] += 1
+            return
+    log(emit)
+
+
+def _log_flusher():
+    while True:
+        time.sleep(2)
+        try:
+            with _log_buf_lock:
+                if not _log_buf:
+                    continue
+                lines, _log_buf[:] = list(_log_buf), []
+            with open(_log_path(), "a", encoding="utf-8") as f:
+                f.write("\n".join(lines) + "\n")
+        except Exception:
+            pass
 
 # ---------------------------------------------------------------- lists
 class Lists:
@@ -427,17 +471,35 @@ def _log_url(req):
     return base[:400]
 
 
+_jsonl_buf = []
+
+
 def _local_append(rec):
-    path = CFG["urlLog"].get("localFile") or os.path.join(DATA, "urls.jsonl")
-    try:
-        cap = int(CFG["urlLog"].get("localMaxMB", 20)) * 1024 * 1024
-        with _local_log_lock:
+    """Buffered for the same reason as log(): this ran once per request, on the event
+    loop, and a blocked endpoint retrying in a loop turned it into a disk storm."""
+    if not CFG["urlLog"].get("localFile") and not CFG["urlLog"].get("enabled"):
+        return
+    with _local_log_lock:
+        if len(_jsonl_buf) < 20000:
+            _jsonl_buf.append(rec)
+
+
+def _jsonl_flusher():
+    while True:
+        time.sleep(5)
+        try:
+            with _local_log_lock:
+                if not _jsonl_buf:
+                    continue
+                recs, _jsonl_buf[:] = list(_jsonl_buf), []
+            path = CFG["urlLog"].get("localFile") or os.path.join(DATA, "urls.jsonl")
+            cap = int(CFG["urlLog"].get("localMaxMB", 20)) * 1024 * 1024
             if cap and os.path.exists(path) and os.path.getsize(path) > cap:
                 os.replace(path, path + ".1")     # keep one generation, never grow forever
             with open(path, "a", encoding="utf-8") as f:
-                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
-    except Exception:
-        pass
+                f.write("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in recs))
+        except Exception:
+            pass
 
 
 def record_url(flow, blocked, user=None, nav=None):
@@ -1195,6 +1257,8 @@ class KidProxy:
             log("config: " + (CFG.get("_configError") or
                               ("loaded, sheet=" + (sheet_id(CFG.get("sheetId")) or "NONE SET"))))
             log("enforceUsers=%s exempt=%s" % (CFG.get("enforceUsers"), CFG.get("exemptUsers")))
+            threading.Thread(target=_log_flusher, daemon=True).start()
+            threading.Thread(target=_jsonl_flusher, daemon=True).start()
             threading.Thread(target=_refresher, daemon=True).start()
             _shared.usage = Usage(os.path.join(DATA, "usage-state.json"), log)
             threading.Thread(target=_usage_saver, daemon=True).start()
@@ -1247,7 +1311,9 @@ class KidProxy:
                     flow.response = blocked_page("Trang này không nằm trong danh sách được phép", host)
                 else:
                     flow.response = http.Response.make(403, b"blocked by kidproxy")
-                log(f"BLOCK site {host} dest={dest or '-'} ref={_hdr_host(flow.request.headers.get('referer',''))} ({user})")
+                log_repeating("blk|%s|%s" % (host, user),
+                              f"BLOCK site {host} dest={dest or '-'} "
+                              f"ref={_hdr_host(flow.request.headers.get('referer',''))} ({user})")
         elif CFG["blockShorts"] and (path.startswith("/shorts") or path.startswith("/youtubei/v1/reel/")):
             blocked = True
             flow.response = blocked_page("YouTube Shorts đã bị tắt", "") if path.startswith("/shorts") else http.Response.make(403, b"shorts blocked")

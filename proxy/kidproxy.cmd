@@ -3,6 +3,10 @@ REM Force KidNest to re-read the allowlist from the Google Sheet right now.
 REM Usage:  kidnest update   (or just: kidproxy)
 setlocal
 set PORT=8080
+if /I "%~1"=="test" (
+  powershell.exe -ExecutionPolicy Bypass -File "%ProgramFiles%\KidNest\kidnest-test.ps1" %2 %3 %4 %5
+  exit /b
+)
 if /I "%~1"=="unlock" (
   powershell.exe -ExecutionPolicy Bypass -File "%ProgramFiles%\KidNest\kidnest-pause.ps1"
   exit /b
